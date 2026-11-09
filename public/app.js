@@ -487,7 +487,7 @@ function mountList(container, type, opts = {}) {
           ${def.batch && canEdit() && FORMS[type].some(f => f[0] === 'ownerId') ? '<button class="btn light small" data-act="batch-assign">批量分配</button>' : ''}
           ${def.batch && canManage() ? '<button class="btn light small danger" data-act="batch-delete">批量删除</button>' : ''}</span>
         ${canEdit() && IMPORTABLE.includes(type) ? `<button class="btn light" data-act="import" data-type="${type}">${icon('upload')}导入</button>` : ''}
-        ${canEdit() ? `<button class="btn light" data-act="export">${icon('download')}导出</button>` : ''}
+        ${canEdit() ? `<span class="btn-group"><button class="btn light" data-act="export" data-format="xlsx" title="导出当前筛选结果为 Excel">${icon('download')}导出 Excel</button><button class="btn light" data-act="export" data-format="csv" title="导出为 CSV">CSV</button></span>` : ''}
         ${canEdit() && def.create ? `<button class="btn" data-act="create" data-type="${type}">${icon('plus')}${def.create}</button>` : ''}
       </div>
     </div>
@@ -697,35 +697,43 @@ async function uploadFiles(input) {
 }
 
 // ======================= 批量导入 =======================
-async function decodeFile(file) {
+/** 读取导入文件：.xlsx → base64；CSV → 文本（UTF-8 失败时按 GBK 解码，兼容 Excel 默认另存） */
+async function readImportFile(file) {
   const buf = await file.arrayBuffer();
-  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { return new TextDecoder('gbk').decode(buf); }
+  if (/\.xlsx$/i.test(file.name)) {
+    let bin = ''; const bytes = new Uint8Array(buf);
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    return { xlsx: btoa(bin) };
+  }
+  if (/\.xls$/i.test(file.name)) throw new Error('不支持旧版 .xls，请在 Excel 中另存为 .xlsx 或 CSV');
+  try { return { csv: new TextDecoder('utf-8', { fatal: true }).decode(buf) }; } catch { return { csv: new TextDecoder('gbk').decode(buf) }; }
 }
 function importModal(type) {
   const dlg = openModal({
     title: `批量导入${ENTITY_LABEL[type]}`, wide: true, submitText: '确认导入',
-    body: `<ol class="howto"><li>下载 <a class="link" href="/api/${type}/import">导入模板</a>，按表头填写（带 * 为必填；负责人填成员姓名${['contacts', 'opportunities'].includes(type) ? '；客户填系统中已有的客户名称' : ''}）。</li>
-      <li>Excel 中“另存为 CSV（UTF-8 或默认编码均可）”，选择文件后系统先预检，全部通过才能导入。</li></ol>
-      <label class="fld wide"><span>CSV 文件</span><input class="field" type="file" accept=".csv,.txt,text/csv" name="file" data-role="import-file"></label><div id="importResult"></div>`,
+    body: `<ol class="howto"><li>下载导入模板：<a class="link" href="/api/${type}/import?format=xlsx">Excel 模板</a> 或 <a class="link" href="/api/${type}/import">CSV 模板</a>，按表头填写（负责人填成员姓名${['contacts', 'opportunities'].includes(type) ? '；客户填系统中已有的客户名称' : ''}）。</li>
+      <li>直接上传 .xlsx（读取第一个工作表）或 CSV，系统先逐行预检，全部通过才能导入。</li></ol>
+      <label class="fld wide"><span>导入文件（.xlsx / .csv）</span><input class="field" type="file" accept=".xlsx,.csv,.txt,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" name="file" data-role="import-file"></label><div id="importResult"></div>`,
     onSubmit: async (fd, form) => {
-      if (!form.csvText) { toast('请先选择文件并完成预检', true); return false; }
-      const r = await API.post(`/${type}/import`, { csv: form.csvText, commit: true });
+      if (!form.payload) { toast('请先选择文件并完成预检', true); return false; }
+      const r = await API.post(`/${type}/import`, { ...form.payload, commit: true });
       toast(`已导入 ${r.imported} 条${ENTITY_LABEL[type]}`); rerender();
     },
   });
   const form = dlg.querySelector('form'), submit = form.querySelector('[type=submit]');
   submit.disabled = true;
   form.querySelector('[data-role=import-file]').addEventListener('change', async e => {
-    const file = e.target.files[0]; form.csvText = ''; submit.disabled = true;
+    const file = e.target.files[0]; form.payload = null; submit.disabled = true;
     if (!file) return;
     const out = $('#importResult', dlg); out.innerHTML = '<div class="loading">预检中…</div>';
     try {
-      const text = await decodeFile(file);
-      const r = await API.post(`/${type}/import`, { csv: text });
+      if (file.size > 4 * 1024 * 1024) throw new Error('文件不能超过 4MB，请分批导入');
+      const payload = await readImportFile(file);
+      const r = await API.post(`/${type}/import`, payload);
       out.innerHTML = `<div class="import-sum"><span>共 <b>${r.total}</b> 行</span><span class="ok">可导入 <b>${r.valid}</b></span><span class="${r.errorCount ? 'neg' : ''}">错误 <b>${r.errorCount}</b></span></div>
         ${r.ignoredColumns.length ? `<p class="muted small">未识别的列（将忽略）：${r.ignoredColumns.map(esc).join('、')}</p>` : ''}
         ${r.errorCount ? `<div class="tbl-wrap plain"><table class="mini edit"><thead><tr><th>行号</th><th>错误</th></tr></thead><tbody>${r.errors.map(x => `<tr><td>${x.line}</td><td>${esc(x.error)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="ok">✓ 预检通过，可以导入</p>'}`;
-      if (!r.errorCount && r.valid) { form.csvText = text; submit.disabled = false; }
+      if (!r.errorCount && r.valid) { form.payload = payload; submit.disabled = false; }
     } catch (err) { out.innerHTML = `<p class="neg">${esc(err.message)}</p>`; }
   });
 }
@@ -1263,9 +1271,9 @@ const ACTIONS = {
     if (!await confirmBox(`确认删除选中的 ${L.selected.size} 条${ENTITY_LABEL[L.type]}？存在关联数据的记录将被跳过。`, '批量删除')) return;
     try { const r = await API.post(`/${L.type}/batch`, { action: 'delete', ids: [...L.selected] }); toast(`已删除 ${r.done.length} 条${r.failed.length ? `，${r.failed.length} 条因存在关联数据未删除` : ''}`, !!r.failed.length); L.selected.clear(); rerender(); } catch (e) { toast(e.message, true); }
   },
-  export: () => { const L = ui.list; location.href = `/api/${L.type}?${listParams(L, false)}&format=csv`; },
+  export: t => { const L = ui.list; location.href = `/api/${L.type}?${listParams(L, false)}&format=${t.dataset.format || 'xlsx'}`; },
   'report-query': () => { ui.tabs.reports = { from: $('#rFrom').value, to: $('#rTo').value }; rerender(); },
-  'report-export': () => { location.href = `/api/reports?from=${encodeURIComponent($('#rFrom').value)}&to=${encodeURIComponent($('#rTo').value)}&format=csv`; },
+  'report-export': () => { location.href = `/api/reports?from=${encodeURIComponent($('#rFrom').value)}&to=${encodeURIComponent($('#rTo').value)}&format=xlsx`; },
   'user-create': () => userModal(),
   mfa: () => mfaModal(),
   'mfa-start': async t => {
@@ -1295,7 +1303,7 @@ const ACTIONS = {
   'logo-del': async () => { settings = (await API.del('/settings/logo')).settings; toast('已移除 Logo'); $('#shell')?.remove(); rerender(); },
   'stmt-query': () => { ui.tabs.stmt = { accountId: $('#stAccount').value, from: $('#stFrom').value, to: $('#stTo').value }; renderStatement($('#financeBody')).catch(e => toast(e.message, true)); },
   'stmt-account': t => { ui.tabs.stmt.accountId = t.dataset.id; renderStatement($('#financeBody')).catch(e => toast(e.message, true)); },
-  'stmt-export': () => { const st = ui.tabs.stmt; location.href = `/api/statements?${new URLSearchParams({ from: st.from, to: st.to, ...(st.accountId ? { accountId: st.accountId } : {}), format: 'csv' })}`; },
+  'stmt-export': () => { const st = ui.tabs.stmt; location.href = `/api/statements?${new URLSearchParams({ from: st.from, to: st.to, ...(st.accountId ? { accountId: st.accountId } : {}), format: 'xlsx' })}`; },
   print: () => window.print(),
   'cf-add': t => { (ui.cfDraft[t.dataset.ent] ||= []).push({ label: '', type: 'text', options: [], required: false, inList: false }); pageSettings(); },
   'cf-del': t => { ui.cfDraft[t.dataset.ent].splice(Number(t.dataset.i), 1); pageSettings(); },

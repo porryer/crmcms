@@ -11,6 +11,7 @@ const { DatabaseSync } = require('node:sqlite');
 const backups = require('./lib/backup');
 const CSV = require('./lib/csv');
 const TOTP = require('./lib/totp');
+const XLSX = require('./lib/xlsx');
 
 const VERSION = '1.2.0';
 const PORT = Number(process.env.PORT || 3100);
@@ -364,13 +365,13 @@ function readBody(req, limit = 1024 * 1024) {
   return new Promise((resolve, reject) => {
     const parts = []; let len = 0, failed = false;
     req.on('data', chunk => {
-      if (failed) return;
       len += chunk.length;
-      if (len > limit) { failed = true; reject(httpError(413, '请求体过大')); return; }
+      if (failed) { if (len > limit + 16 * 1048576) { req.destroy(); reject(httpError(413, '请求体过大')); } return; }
+      if (len > limit) { failed = true; parts.length = 0; return; }
       parts.push(chunk);
     });
     req.on('end', () => {
-      if (failed) return;
+      if (failed) return reject(httpError(413, '请求体过大'));
       try { resolve(JSON.parse(Buffer.concat(parts).toString('utf8') || '{}')); } catch { reject(httpError(400, 'JSON格式错误')); }
     });
     req.on('error', reject);
@@ -378,10 +379,18 @@ function readBody(req, limit = 1024 * 1024) {
 }
 /** 防 CSV 公式注入：以 = + - @ 制表/回车开头的单元格前加单引号 */
 const csv = CSV.stringify;
+/** 导出表格：?format=xlsx 输出 Excel，否则输出 UTF-8 BOM CSV */
 function sendCSV(res, filename, headers, rows) {
-  res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="${filename.replace(/[^\x20-\x7e]/g, '_').replace(/"/g, '')}"; filename*=UTF-8''${encodeURIComponent(filename)}`, 'Cache-Control': 'no-store' });
-  res.end(csv(headers, rows));
+  const xlsx = res.exportFormat === 'xlsx';
+  if (xlsx) filename = filename.replace(/\.csv$/, '.xlsx');
+  const body = xlsx ? XLSX.writeWorkbook(headers, rows.map(r => r.map(v => (typeof v === 'string' && /^[=+\-@]/.test(v) ? "'" + v : v))), filename.replace(/\.xlsx$/, '').slice(0, 31)) : csv(headers, rows);
+  res.writeHead(200, {
+    'Content-Type': xlsx ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : 'text/csv; charset=utf-8',
+    'Content-Disposition': `attachment; filename="${filename.replace(/[^\x20-\x7e]/g, '_').replace(/"/g, '')}"; filename*=UTF-8''${encodeURIComponent(filename)}`, 'Cache-Control': 'no-store',
+  });
+  res.end(body);
 }
+const isExport = url => ['csv', 'xlsx'].includes(url.searchParams.get('format'));
 
 // ---------- 校验 ----------
 function sanitize(type, obj, existing = {}, u = null) {
@@ -975,24 +984,27 @@ function receiveFile(req, dest, max) {
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     const tmp = `${dest}.${crypto.randomBytes(4).toString('hex')}.tmp`;
     const out = fs.createWriteStream(tmp, { flags: 'wx' });
-    const hash = crypto.createHash('sha256'); let size = 0, failed = false;
-    const fail = e => { if (failed) return; failed = true; out.destroy(); fs.rm(tmp, { force: true }, () => {}); reject(e); };
+    const hash = crypto.createHash('sha256'); let size = 0, failed = null, settled = false;
+    const finish = (err, val) => { if (settled) return; settled = true; if (err) { out.destroy(); fs.rm(tmp, { force: true }, () => {}); reject(err); } else resolve(val); };
+    const tooBig = () => httpError(413, `文件不能超过 ${Math.round(max / 1048576)}MB`);
+    // 超限后继续读完请求体再响应（最多再读 64MB），否则客户端可能收到连接重置而非 413
+    if (Number(req.headers['content-length']) > max + 64 * 1048576) { finish(tooBig()); req.destroy(); return; }
     req.on('data', chunk => {
-      if (failed) return;
       size += chunk.length;
-      if (size > max) return fail(httpError(413, `文件不能超过 ${Math.round(max / 1048576)}MB`));
+      if (failed) { if (size > max + 64 * 1048576) { req.destroy(); finish(failed); } return; }
+      if (size > max) { failed = tooBig(); out.destroy(); return; }
       hash.update(chunk);
       if (!out.write(chunk)) { req.pause(); out.once('drain', () => req.resume()); }
     });
     req.on('end', () => {
-      if (failed) return;
+      if (failed) return finish(failed);
       out.end(() => {
-        if (!size) return fail(httpError(400, '文件为空'));
-        try { fs.renameSync(tmp, dest); } catch (e) { return fail(e); }
-        resolve({ size, sha256: hash.digest('hex') });
+        if (!size) return finish(httpError(400, '文件为空'));
+        try { fs.renameSync(tmp, dest); } catch (e) { return finish(e); }
+        finish(null, { size, sha256: hash.digest('hex') });
       });
     });
-    req.on('error', fail);
+    req.on('error', e => finish(failed || e));
   });
 }
 function fileName(req) {
@@ -1067,8 +1079,11 @@ function importTemplate(u, type) {
   const cols = importColumns(u, type);
   return { headers: cols.map(c => c.aliases[0]), rows: [cols.map(c => IMPORT_EXAMPLE[type][c.key] ?? '')] };
 }
-function importRecords(u, type, text, commit) {
-  const rows = CSV.parse(text);
+function importRecords(u, type, input, commit) {
+  let rows;
+  if (input.xlsx) {
+    try { rows = XLSX.readRows(Buffer.from(String(input.xlsx), 'base64')); } catch (e) { boom(400, `无法读取 Excel 文件：${e.message}`); }
+  } else rows = CSV.parse(String(input.csv || ''));
   if (rows.length < 2) boom(400, '文件中没有数据行（第一行须为表头）');
   if (rows.length > 5001) boom(400, '单次最多导入 5000 行');
   const cols = importColumns(u, type);
@@ -1209,6 +1224,7 @@ async function updateUser(u, req, userId) {
 // ---------- 路由 ----------
 async function api(req, res, url) {
   const p = url.pathname, m = req.method;
+  res.exportFormat = url.searchParams.get('format');
   if (p === '/api/health') {
     // 数据库可读 + 可获取写锁（磁盘只读/满、文件损坏时返回 503，供容器健康检查与监控告警使用）
     let dbOk = true;
@@ -1354,7 +1370,7 @@ async function api(req, res, url) {
   if (attMatch) return attachmentsApi(u, req, res, url, attMatch[1], attMatch[2]);
   if (p === '/api/statements' && m === 'GET') {
     const r = statement(u, url.searchParams.get('accountId') || '', url.searchParams.get('from'), url.searchParams.get('to'));
-    if (url.searchParams.get('format') === 'csv') {
+    if (isExport(url)) {
       if (!canWrite(u)) boom(403, '没有导出权限');
       audit(u, 'export', 'statements', r.accountId || '*', { from: r.from, to: r.to });
       if (r.accountId) {
@@ -1391,7 +1407,7 @@ async function api(req, res, url) {
   if (p === '/api/search' && m === 'GET') return send(res, 200, search(u, url.searchParams.get('q')));
   if (p === '/api/reports' && m === 'GET') {
     const r = reports(u, url.searchParams.get('from'), url.searchParams.get('to'));
-    if (url.searchParams.get('format') === 'csv') {
+    if (isExport(url)) {
       if (!canWrite(u)) boom(403, '没有导出权限');
       audit(u, 'export', 'reports', '*', { from: r.from, to: r.to });
       return sendCSV(res, `report_${r.from}_${r.to}.csv`, ['月份', '成交金额', '回款金额', '新增客户'], r.months.map(x => [x.label, x.contractAmount, x.payments, x.newAccounts]));
@@ -1406,7 +1422,7 @@ async function api(req, res, url) {
 
   if (!recordId && m === 'GET') {
     const result = listRecords(u, type, url.searchParams);
-    if (url.searchParams.get('format') === 'csv') {
+    if (isExport(url)) {
       if (!canWrite(u)) boom(403, '没有导出权限');
       const all = listRecords(u, type, new URLSearchParams([...url.searchParams].filter(([k]) => !['page', 'pageSize'].includes(k))));
       audit(u, 'export', type, '*', { count: all.items.length });
@@ -1446,7 +1462,7 @@ async function api(req, res, url) {
     if (m === 'POST') {
       if (!canWrite(u)) boom(403, '无导入权限');
       const b = await readBody(req, 6 * 1024 * 1024);
-      return send(res, 200, importRecords(u, type, String(b.csv || ''), b.commit === true));
+      return send(res, 200, importRecords(u, type, b, b.commit === true));
     }
   }
 
@@ -1667,7 +1683,7 @@ if (require.main === module && BACKUP_INTERVAL_HOURS > 0) {
 }
 
 if (require.main === module) {
-  server.listen(PORT, process.env.HOST || '0.0.0.0', () => console.log(`NovaCRM V${VERSION} listening on http://localhost:${PORT}`));
+  server.listen(PORT, process.env.HOST || '0.0.0.0', () => console.log(`NovaCRM V${VERSION} listening on http://localhost:${server.address().port}`));
   const shutdown = () => server.close(() => { db.close(); process.exit(0); });
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);

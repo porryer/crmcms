@@ -3,7 +3,7 @@
 const test = require('node:test'), assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'novacrm-v11-')), port = 33000 + Math.floor(Math.random() * 1000);
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'novacrm-v11-')), port = 62000 + Math.floor(Math.random() * 1000);
 const BASE = 'http://127.0.0.1:' + port;
 let proc, cookie;
 async function req(p, { method = 'GET', body, cookie: auth = cookie, headers = {} } = {}) {

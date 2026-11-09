@@ -34,3 +34,22 @@ test('backups include attachments and logo; restore brings them back', async t =
   assert.equal(await dl.text(), '合同原件内容');
   assert.equal((await fetch(`${s2.base}/api/settings/logo`, { headers: { Cookie: s2.cookie } })).status, 200);
 });
+
+test('xlsx import (file produced by openpyxl), xlsx template and export', async t => {
+  const XLSX = require('../lib/xlsx');
+  const s = await startServer(); t.after(() => s.stop());
+  const tpl = await fetch(`${s.base}/api/accounts/import?format=xlsx`, { headers: { Cookie: s.cookie } });
+  assert.match(tpl.headers.get('content-type'), /spreadsheetml/);
+  assert.deepEqual(XLSX.readRows(Buffer.from(await tpl.arrayBuffer()))[0].slice(0, 2), ['客户名称', '客户类型']);
+  const xlsx = fs.readFileSync(path.join(__dirname, 'fixtures', 'accounts.xlsx')).toString('base64');
+  const dry = (await s.req('/accounts/import', { method: 'POST', body: { xlsx } })).data;
+  assert.equal(dry.total, 2); assert.equal(dry.errorCount, 0);
+  assert.equal((await s.req('/accounts/import', { method: 'POST', body: { xlsx, commit: true } })).data.imported, 2);
+  const a = (await s.req('/accounts?q=' + encodeURIComponent('表格导入科技'))).data.items[0];
+  assert.equal(a.foundedAt, '2019-03-08'); assert.equal(a.phone, '13800138000'); assert.equal(a.level, 'VIP'); assert.equal(a.notes, '含 <特殊> & "符号"');
+  assert.equal((await s.req('/accounts/import', { method: 'POST', body: { xlsx: Buffer.from('not a zip').toString('base64') } })).status, 400);
+  const ex = await fetch(`${s.base}/api/accounts?format=xlsx`, { headers: { Cookie: s.cookie } });
+  assert.match(ex.headers.get('content-disposition'), /accounts\.xlsx/);
+  const rows = XLSX.readRows(Buffer.from(await ex.arrayBuffer()));
+  assert.ok(rows[0].includes('名称')); assert.ok(rows.some(r => r.includes('表格导入制造')));
+});

@@ -1,7 +1,7 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
 const {spawn}=require('node:child_process');const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
-const dir=fs.mkdtempSync(path.join(os.tmpdir(),'novacrm-test-')),port=32000+Math.floor(Math.random()*1000);let proc,cookie;
+const dir=fs.mkdtempSync(path.join(os.tmpdir(),'novacrm-test-')),port=61000+Math.floor(Math.random()*1000);let proc,cookie;
 async function req(p,{method='GET',body,cookie:auth=cookie}={}){const r=await fetch('http://127.0.0.1:'+port+'/api'+p,{method,headers:{...(body?{'Content-Type':'application/json'}:{}),...(auth?{Cookie:auth}:{})},body:body?JSON.stringify(body):undefined});const data=await r.json();return {status:r.status,data,cookie:r.headers.get('set-cookie')}};
 async function start(){proc=spawn(process.execPath,['server.js'],{cwd:path.join(__dirname,'..'),env:{...process.env,DATA_DIR:dir,PORT:String(port),CRM_ADMIN_PASSWORD:'TestPassword!1234'}});let logs='';proc.stdout.on('data',b=>logs+=b);proc.stderr.on('data',b=>logs+=b);for(let i=0;i<80;i++){if(proc.exitCode!==null)throw new Error('Server crashed: '+logs);try{const r=await fetch('http://127.0.0.1:'+port+'/api/health');if(r.ok)return}catch{}await new Promise(r=>setTimeout(r,80))}throw new Error('Server start timeout '+logs)}
 test('CRM V1.0 API integration and RBAC',async t=>{await start();t.after(async()=>{proc.kill('SIGTERM');await new Promise(r=>proc.once('exit',r));fs.rmSync(dir,{recursive:true,force:true})});
