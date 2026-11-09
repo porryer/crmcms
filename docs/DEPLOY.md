@@ -36,7 +36,8 @@ docker compose logs crm      # 首次启动信息
 
 - **自动**：服务每 `BACKUP_INTERVAL_HOURS` 小时生成一次 SQLite 一致性快照到 `DATA_DIR/backups/`，超出 `BACKUP_KEEP` 的旧快照自动删除；启动时若距最近一次超过间隔，1 分钟后补做一次。
 - **手动**：管理员在“系统设置 → 安全与运维”点“立即备份”，或执行 `npm run backup`（Docker：`docker compose exec crm node scripts/backup.js`）。
-- **异地**：快照仍在同一磁盘/卷上，务必再同步到异地（对象存储、NAS），例如每日 `docker cp` 或 `rclone copy`。
+- **附件**：每次备份把 `data/files/` 中新增的附件增量复制到 `backups/files/` 文件池（附件写入后不再修改，多份快照共享），清理旧快照时一并删除不再被引用的文件。
+- **异地**：快照仍在同一磁盘/卷上，务必把整个 `backups/` 目录（快照 + `files/` 文件池）同步到异地（对象存储、NAS），例如每日 `rclone copy`。
 
 ## 4. 恢复演练（建议每季度一次）
 
@@ -46,7 +47,7 @@ docker compose run --rm crm node scripts/restore.js /app/data/backups/<快照文
 docker compose start crm
 ```
 
-恢复脚本会先执行 `PRAGMA integrity_check` 并确认快照内有用户数据，然后把当前库及 `-wal/-shm` 移到 `data/pre-restore-<时间>/`，再替换为快照。确认无误后可删除该目录。
+恢复脚本会先执行 `PRAGMA integrity_check` 并确认快照内有用户数据，然后把当前库及 `-wal/-shm` 移到 `data/pre-restore-<时间>/`，再替换为快照，并从 `backups/files/` 补回快照引用的附件（有缺失时退出码为 2 并列出）。从异地取回快照时，需要把 `backups/files/` 一并放回数据目录。确认无误后可删除该目录。
 
 ## 5. 升级
 

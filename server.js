@@ -971,10 +971,12 @@ const fileDir = tenantId => path.join(DATA_DIR, 'files', tenantId);
 /** 流式写入请求体到文件并计算 sha256，超过 max 则中止 */
 function receiveFile(req, dest, max) {
   return new Promise((resolve, reject) => {
+    // 先写临时文件，完整接收后原子改名（备份只复制正式文件名，避免收录半截文件）
     fs.mkdirSync(path.dirname(dest), { recursive: true });
-    const out = fs.createWriteStream(dest, { flags: 'wx' });
+    const tmp = `${dest}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+    const out = fs.createWriteStream(tmp, { flags: 'wx' });
     const hash = crypto.createHash('sha256'); let size = 0, failed = false;
-    const fail = e => { if (failed) return; failed = true; out.destroy(); fs.rm(dest, { force: true }, () => {}); reject(e); };
+    const fail = e => { if (failed) return; failed = true; out.destroy(); fs.rm(tmp, { force: true }, () => {}); reject(e); };
     req.on('data', chunk => {
       if (failed) return;
       size += chunk.length;
@@ -982,7 +984,14 @@ function receiveFile(req, dest, max) {
       hash.update(chunk);
       if (!out.write(chunk)) { req.pause(); out.once('drain', () => req.resume()); }
     });
-    req.on('end', () => { if (failed) return; out.end(() => (size ? resolve({ size, sha256: hash.digest('hex') }) : fail(httpError(400, '文件为空')))); });
+    req.on('end', () => {
+      if (failed) return;
+      out.end(() => {
+        if (!size) return fail(httpError(400, '文件为空'));
+        try { fs.renameSync(tmp, dest); } catch (e) { return fail(e); }
+        resolve({ size, sha256: hash.digest('hex') });
+      });
+    });
     req.on('error', fail);
   });
 }
@@ -1316,7 +1325,7 @@ async function api(req, res, url) {
   }
   if (p === '/api/settings/logo') {
     if (m === 'GET') {
-      const st = getSettings(u.tenant_id), file = path.join(fileDir(u.tenant_id), 'logo');
+      const st = getSettings(u.tenant_id), file = path.join(fileDir(u.tenant_id), st.logoFile || 'logo');
       if (!st.logo || !fs.existsSync(file)) boom(404, '未设置 Logo');
       res.writeHead(200, { 'Content-Type': st.logo, 'Cache-Control': 'private, max-age=300', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'" });
       return fs.createReadStream(file).pipe(res);
@@ -1326,11 +1335,12 @@ async function api(req, res, url) {
     if (m === 'POST') {
       const mime = String(req.headers['content-type'] || '').split(';')[0];
       if (!['image/png', 'image/jpeg', 'image/webp'].includes(mime)) boom(415, 'Logo 仅支持 PNG / JPG / WebP');
-      const file = path.join(fileDir(u.tenant_id), 'logo'), tmp = file + '.' + newId();
-      await receiveFile(req, tmp, 512 * 1024);
-      fs.renameSync(tmp, file);
-      st.logo = mime;
-    } else if (m === 'DELETE') { st.logo = ''; fs.rmSync(path.join(fileDir(u.tenant_id), 'logo'), { force: true }); }
+      // 每次上传使用新文件名（不可变），便于增量备份；旧文件保留在备份文件池中
+      const name = 'logo-' + newId().slice(0, 8), prev = st.logoFile || (st.logo ? 'logo' : '');
+      await receiveFile(req, path.join(fileDir(u.tenant_id), name), 512 * 1024);
+      if (prev) fs.rmSync(path.join(fileDir(u.tenant_id), prev), { force: true });
+      st.logo = mime; st.logoFile = name;
+    } else if (m === 'DELETE') { if (st.logoFile || st.logo) fs.rmSync(path.join(fileDir(u.tenant_id), st.logoFile || 'logo'), { force: true }); st.logo = ''; st.logoFile = ''; }
     else boom(405, '不支持的操作');
     db.prepare('UPDATE tenants SET settings=? WHERE id=?').run(JSON.stringify(st), u.tenant_id);
     audit(u, 'update', 'settings', u.tenant_id, { logo: st.logo });

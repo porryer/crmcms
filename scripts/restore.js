@@ -22,4 +22,9 @@ const keepDir = path.join(dir, 'pre-restore-' + new Date().toISOString().replace
 fs.mkdirSync(keepDir, { recursive: true });
 for (const suffix of ['', '-wal', '-shm']) if (fs.existsSync(target + suffix)) fs.renameSync(target + suffix, path.join(keepDir, 'crm.sqlite' + suffix));
 fs.copyFileSync(src, target);
+// 附件：从备份文件池补回快照引用的文件（当前目录中已有的文件保持不动）
+const { restoreFiles } = require('../lib/backup');
+const files = restoreFiles(dir, src);
 console.log('恢复完成。原数据库已保存在', keepDir, '，请重新启动服务并核对数据。');
+console.log(`附件：从备份池恢复 ${files.restored} 个文件` + (files.missing.length ? `，缺失 ${files.missing.length} 个（备份池中不存在）: ${files.missing.slice(0, 5).join(', ')}` : ''));
+if (files.missing.length) process.exitCode = 2;

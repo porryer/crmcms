@@ -8,6 +8,12 @@ const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const { chromium, devices } = require('playwright');
 const { startServer } = require('../helpers');
+/** 在 Node 侧轮询（页面启用严格 CSP，避免 waitForFunction 在部分 Playwright 版本中使用 eval） */
+async function waitFor(fn, timeout = 10000) {
+  const end = Date.now() + timeout;
+  while (Date.now() < end) { if (await fn().catch(() => false)) return; await new Promise(r => setTimeout(r, 100)); }
+  throw new Error('waitFor timeout');
+}
 
 test('end-to-end smoke', { timeout: 180000 }, async t => {
   const s = await startServer();
@@ -80,7 +86,7 @@ test('end-to-end smoke', { timeout: 180000 }, async t => {
     await page.click('dialog button[type=submit]'); await settle();
     await page.waitForSelector('td .tag:has-text("已签订")');
     await page.click('button[data-act=pay-contract]');
-    await page.waitForFunction(() => document.querySelector('dialog select[name=contractId]')?.value);
+    await waitFor(async () => !!(await page.inputValue('dialog select[name=contractId]')));
     await page.fill('dialog [name=amount]', '30000');
     await page.click('dialog button[type=submit]'); await settle();
     const fin = (await s.req('/finance')).data.totals;
@@ -142,7 +148,7 @@ test('end-to-end smoke', { timeout: 180000 }, async t => {
     const box = await mp.locator('.aside').boundingBox();
     assert.ok(box.x + box.width <= 1, '侧栏默认收起在屏幕外');
     await mp.click('.tabbar [data-act=toggle-nav]');
-    await mp.waitForFunction(() => document.querySelector('.aside').getBoundingClientRect().x >= 0);
+    await waitFor(async () => (await mp.locator('.aside').boundingBox()).x >= 0);
     await m.close();
   });
 
