@@ -7,7 +7,7 @@
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const { chromium, devices } = require('playwright');
-const { startServer } = require('../helpers');
+const { startServer, mockIdp } = require('../helpers');
 /** 在 Node 侧轮询（页面启用严格 CSP，避免 waitForFunction 在部分 Playwright 版本中使用 eval） */
 async function waitFor(fn, timeout = 10000) {
   const end = Date.now() + timeout;
@@ -144,6 +144,30 @@ test('end-to-end smoke', { timeout: 180000 }, async t => {
     await p2.click('[data-act=user-menu]'); await p2.click('[data-act=logout]');
     await login(() => TOTP.totp(secret));
     await ctx2.close();
+  });
+
+  await t.test('single sign-on via OIDC in the browser', async () => {
+    const idp = await mockIdp();
+    try {
+      const s2 = await startServer({ env: { SSO_ALLOW_HTTP: '1' } });
+      try {
+        await s2.req('/settings', { method: 'PUT', body: { sso: { enabled: true, issuer: idp.base, clientId: 'crm-app', clientSecret: 'top-secret', buttonText: '企业账号登录', autoCreate: true } } });
+        idp.browserClaims = { sub: 'browser-1', email: 'browser@x.cn', name: '浏览器用户' };
+        const ctx3 = await browser.newContext(); const p3 = await ctx3.newPage();
+        p3.on('pageerror', e => problems.push('sso pageerror: ' + e.message));
+        await p3.goto(s2.base + '/');
+        await p3.click('#ssoBox a:has-text("企业账号登录")');
+        await p3.waitForSelector('.kpis');
+        assert.match(await p3.textContent('.uname'), /浏览器用户/);
+        // 失败回跳显示错误
+        idp.browserClaims = { sub: 'other', email: 'browser@x.cn' };
+        const p4 = await (await browser.newContext()).newPage();
+        await p4.goto(s2.base + '/'); await p4.click('#ssoBox a');
+        await p4.waitForSelector('.toast.error');
+        assert.match(await p4.textContent('.toast'), /已绑定其他身份/);
+        await ctx3.close();
+      } finally { await s2.stop(); }
+    } finally { idp.close(); }
   });
 
   await t.test('mobile layout', async () => {

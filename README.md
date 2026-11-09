@@ -1,5 +1,7 @@
-# NovaCRM V1.2 · 可离线运行的 Web CRM
+# NovaCRM V1.3 · 可离线运行的 Web CRM
 
+> V1.3：附件纳入备份、Excel 导入导出、邮件通知、两步验证二维码、OIDC 单点登录，见 REVIEW 第六节。
+>
 > V1.2：数据权限、整数分金额、定时备份、HTTPS 部署、导入/附件/对账/自定义字段/通知/多级审批、两步验证、E2E 与 CI，见 REVIEW 第五节与 [docs/DEPLOY.md](docs/DEPLOY.md)。
 >
 > V1.1：对照原型完成代码审查与功能补全，详见 [docs/REVIEW_V1.1.md](docs/REVIEW_V1.1.md)（问题清单、补全清单、验证结果与下一步建议）。

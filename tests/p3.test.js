@@ -3,7 +3,7 @@
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path');
 const { execFileSync } = require('node:child_process');
-const { startServer, ROOT } = require('./helpers');
+const { startServer, ROOT, mockIdp } = require('./helpers');
 
 test('backups include attachments and logo; restore brings them back', async t => {
   const s = await startServer();
@@ -179,4 +179,60 @@ test('QR code encoder: structure, format info and versions (decoded externally w
   // MFA 接口返回二维码
   const s = await startServer(); t.after(() => s.stop());
   assert.match((await s.req('/mfa/setup', { method: 'POST' })).data.qrSvg, /^<svg/);
+});
+
+test('OIDC single sign-on', async t => {
+  const idp = await mockIdp();
+  const s = await startServer({ env: { SSO_ALLOW_HTTP: '1', PUBLIC_ORIGIN: 'http://crm.local' } });
+  t.after(async () => { await s.stop(); idp.close(); });
+  /** 走一遍 start → (模拟 IdP 授权) → callback，返回 { location, cookie } */
+  const flow = async ({ claims = {}, key, mutate } = {}) => {
+    const start = await fetch(s.base + '/api/sso/start', { redirect: 'manual' });
+    const auth = new URL(start.headers.get('location'));
+    assert.equal(auth.origin, idp.base); assert.equal(auth.searchParams.get('code_challenge_method'), 'S256');
+    const code = 'c' + Math.random();
+    idp.codes.set(code, { challenge: auth.searchParams.get('code_challenge'), nonce: auth.searchParams.get('nonce'), redirectUri: auth.searchParams.get('redirect_uri'), claims, key });
+    let state = auth.searchParams.get('state');
+    if (mutate) state = mutate(state);
+    const cb = await fetch(`${s.base}/api/sso/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`, { redirect: 'manual' });
+    return { status: cb.status, location: decodeURIComponent(cb.headers.get('location') || ''), cookie: cb.headers.get('set-cookie')?.split(';')[0], state };
+  };
+  assert.equal((await (await fetch(s.base + '/api/sso/config')).json()).enabled, false);
+  assert.equal((await s.req('/settings', { method: 'PUT', body: { sso: { enabled: true, issuer: 'ftp://x', clientId: 'a' } } })).status, 400);
+  assert.equal((await s.req('/settings', { method: 'PUT', body: { sso: { enabled: true, issuer: 'http://127.0.0.1:1', clientId: 'a' } } })).status, 400, '发现文档不可达');
+  const st = (await s.req('/settings', { method: 'PUT', body: { sso: { enabled: true, issuer: idp.base, clientId: 'crm-app', clientSecret: 'top-secret', buttonText: '飞书/企业账号登录' } } })).data.settings.sso;
+  assert.equal(st.clientSecret, ''); assert.equal(st.secretSet, true); assert.equal(st.redirectUri, 'http://crm.local/api/sso/callback');
+  assert.deepEqual(await (await fetch(s.base + '/api/sso/config')).json(), { enabled: true, buttonText: '飞书/企业账号登录', enforce: false });
+
+  // 未开通的账号
+  assert.match((await flow()).location, /尚未在系统中开通/);
+  // 已开通账号登录成功
+  const uid = (await s.req('/users', { method: 'POST', body: { email: 'SSO@x.cn', name: '单点用户', password: 'Password!12345', role: 'sales' } })).data.id;
+  const ok = await flow();
+  assert.equal(ok.location, '/#/dashboard'); assert.ok(ok.cookie);
+  assert.equal((await s.req('/me', { cookie: ok.cookie })).data.user.id, uid);
+  // state 只能使用一次 / 伪造 state
+  assert.match((await fetch(`${s.base}/api/sso/callback?code=x&state=${ok.state}`, { redirect: 'manual' })).headers.get('location'), /sso_error/);
+  assert.match((await flow({ mutate: () => 'forged' })).location, /已失效/);
+  // 各类令牌异常
+  assert.match((await flow({ claims: { nonce: 'other' } })).location, /nonce/);
+  assert.match((await flow({ claims: { aud: 'another-app' } })).location, /受众/);
+  assert.match((await flow({ claims: { iss: 'https://evil.example' } })).location, /签发方/);
+  assert.match((await flow({ key: 'evil' })).location, /签名无效/);
+  assert.match((await flow({ claims: { exp: Math.floor(Date.now() / 1000) - 600 } })).location, /过期/);
+  assert.match((await flow({ claims: { email_verified: false } })).location, /未验证/);
+  // 首次登录后绑定 sub，邮箱被他人身份冒用时拒绝
+  assert.match((await flow({ claims: { sub: 'sub-2' } })).location, /已绑定其他身份/);
+  assert.equal((await s.req('/users')).data.items.find(x => x.id === uid).ssoBound, 1);
+  // 自动开通
+  await s.req('/settings', { method: 'PUT', body: { sso: { autoCreate: true, defaultRole: 'viewer', defaultDept: '销售部' } } });
+  const auto = await flow({ claims: { sub: 'sub-9', email: 'newbie@x.cn', name: '新同事' } });
+  assert.equal(auto.location, '/#/dashboard');
+  const nu = (await s.req('/me', { cookie: auto.cookie })).data.user;
+  assert.equal(nu.role, 'viewer'); assert.equal(nu.name, '新同事'); assert.equal(nu.department, '销售部');
+  // 强制单点登录：非管理员不能用密码登录，管理员可以
+  await s.req('/settings', { method: 'PUT', body: { sso: { enforce: true } } });
+  const pw = await s.login('sso@x.cn', 'Password!12345');
+  assert.equal(pw.status, 403); assert.match(pw.data.error, /单点登录/);
+  assert.equal(typeof await s.login('admin@local.crm', 'TestPassword!1234'), 'string');
 });
