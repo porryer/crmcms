@@ -27,6 +27,7 @@ docker compose logs crm      # 首次启动信息
 | `TZ` | 容器 `Asia/Shanghai` | 统计“本月/今天”的业务时区 |
 | `CRM_ADMIN_EMAIL` / `CRM_ADMIN_PASSWORD` | — | 仅首次建库时使用 |
 | `COOKIE_SECURE` | 0 | HTTPS 下设为 1 |
+| `SESSION_HOURS` | 8 | 登录会话有效期（小时，1–720，可为小数）。到期后需重新登录；修改只影响之后新建的会话 |
 | `PUBLIC_ORIGIN` | — | 允许的站点来源，可逗号分隔多个 |
 | `TRUST_PROXY` | 0 | 位于反向代理之后设为 1 |
 | `BACKUP_INTERVAL_HOURS` | 24 | 自动备份间隔，0 关闭 |

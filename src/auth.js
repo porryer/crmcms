@@ -31,7 +31,7 @@ function authenticate(req) {
 function createSession(u, res) {
   const token = crypto.randomBytes(32).toString('hex');
   db.prepare('INSERT INTO sessions VALUES(?,?,?)').run(tokenHash(token), u.id, new Date(Date.now() + SESSION_HOURS * 3600000).toISOString());
-  appendCookie(res, makeCookie(token, SESSION_HOURS * 3600));
+  appendCookie(res, makeCookie(token, Math.round(SESSION_HOURS * 3600)));
 }
 const purgeSessions = () => { db.prepare('DELETE FROM sessions WHERE expiry<=?').run(now()); db.prepare('DELETE FROM sso_states WHERE created_at<?').run(Date.now() - 600000); };
 

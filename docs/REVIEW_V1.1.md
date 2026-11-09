@@ -165,3 +165,13 @@ V1.3 遗留的“TLS 通道未在测试中覆盖”已补齐：`tests/smtp-tls.t
 反向验证：临时关闭证书校验时“不受信任证书”用例失败，去掉 STARTTLS 检查时“降级”用例失败。`lib/smtp.js` 新增可选 `ca` 参数；运行中的服务使用企业内部 CA 时，通过 `NODE_EXTRA_CA_CERTS` 配置（见 DEPLOY）。
 
 README 重写为当前实际功能与边界（原文仍为 V1.0 说明，列出的“尚未实现”多数已实现）。
+
+## 十一、工程改进（V1.7）
+
+| 事项 | 实现 |
+|---|---|
+| 会话有效期可配置 | 环境变量 `SESSION_HOURS`（小时，1–720，可为小数，默认 8），同时决定 Cookie `Max-Age` 与服务端会话过期时间；取值无效时告警并使用默认值。`tests/session.test.js` 覆盖解析边界、Cookie 与数据库中的过期时间 |
+| CI 增加 ESLint | `eslint.config.js`（eslint:recommended，按 Node / 浏览器模块 / E2E 区分全局变量）；CI 临时安装 eslint 后运行 `npm run lint`，项目仍无运行时依赖。首次检查发现并修复两个测试中的未使用变量；中文文案中的全角空格、清洗输入用的控制字符正则为有意写法，在配置中说明后放行 |
+| 前端拆分为 ES 模块 | 原 1539 行的 `public/app.js` 按原有分区拆为 `public/js/` 下 22 个模块（`main` 入口 + 公共模块 + `pages/` 各页面），`<script type="module">` 直接加载，无构建步骤，CSP 不变。拆分用脚本完成：代码按原文搬运，按作用域分析自动生成 import / export；ES 模块导入的绑定只读，因此当前用户 / 设置的 25 处赋值改为 `setMe()` / `setSettings()`；`debounce` 改为函数声明，避免模块循环依赖时的初始化顺序问题；`forms` 与 `actions` 的全局事件监听保持原注册顺序 |
+
+**验证**：`npm run check`（含前端模块语法检查）、`npm run lint` 通过；`npm test` 59/59；`npm run e2e` 14/14；另用无头浏览器逐一打开 14 个页面与系统设置 7 个标签，无脚本错误。

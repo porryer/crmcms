@@ -1,6 +1,6 @@
 # NovaCRM · 可离线运行的 Web CRM
 
-零依赖（Node.js 22 内置 `node:sqlite`）、严格 CSP、可内网离线部署的客户关系管理系统。当前版本 **1.6.x**。
+零依赖（Node.js 22 内置 `node:sqlite`）、严格 CSP、可内网离线部署的客户关系管理系统。当前版本 **1.7.x**。
 
 ![工作台](docs/screenshots/01-dashboard.png)
 
@@ -8,6 +8,7 @@
 
 | 版本 | 内容 | 详细说明 |
 |---|---|---|
+| V1.7 | 会话有效期可配置（`SESSION_HOURS`）、CI 增加 ESLint、前端拆分为 ES 模块 | REVIEW 第十一节 |
 | V1.6 | 企业微信 / 钉钉个人工作通知、通知链接登录后直达原页面、安全自查修复；SMTP 加密通道测试 | REVIEW 第八、九节 |
 | V1.5 | 钉钉客户端内免登 | REVIEW 第七节 |
 | V1.4 | 企业微信 / 钉钉扫码登录、客户端内免登、个人菜单自助绑定 | REVIEW 第七节 |
@@ -52,11 +53,18 @@ docker compose logs crm # 查看首次启动信息
 
 ```bash
 npm run check   # 语法检查
+npm run lint    # ESLint（需先临时安装，见下）
 npm test        # API 集成测试（自动启动隔离数据库与服务）
 npm run e2e     # 浏览器端到端测试（需 Playwright + Chromium）
 ```
 
-GitHub Actions（`.github/workflows/ci.yml`）在每次推送时运行以上三项并构建 Docker 镜像。
+ESLint 不作为项目依赖，运行前临时安装（不写入 package.json）：
+
+```bash
+npm install --no-save --no-package-lock eslint@9.39.4 @eslint/js@9.39.4 globals@16.5.0
+```
+
+GitHub Actions（`.github/workflows/ci.yml`）在每次推送时运行以上各项并构建 Docker 镜像。
 
 演示数据（仅演示环境，服务启动后执行）：
 
@@ -72,7 +80,8 @@ CRM_URL=http://localhost:3100 CRM_PASSWORD=你的管理员密码 npm run seed
 | `src/` | 服务端模块：`config` 配置、`db` 表结构、`constants` 业务字典、`auth` 密码与会话、`scope` 数据权限、`settings` 系统设置、`records` 校验与审批、`query` 列表与搜索、`stats` 统计与对账、`notify` 通知、`sso` 第三方登录、`attachments` 附件、`importer` 导入、`users` 成员、`app` HTTP 服务 |
 | `src/routes/` | API 路由，按 `public`（免登录）→ `account` → `settings` → `data` → `admin` → `records`（通用实体）顺序匹配 |
 | `lib/` | SMTP、OIDC、企业微信、钉钉、TOTP、二维码、xlsx、CSV、备份 |
-| `public/` | 单页前端（`index.html`、`app.js`、`style.css`）与精简的钉钉 JSAPI |
+| `public/` | 单页前端：`index.html`、`style.css`、精简的钉钉 JSAPI（`vendor/`） |
+| `public/js/` | 前端 ES 模块（无构建，浏览器直接加载）：`main` 入口、`constants` 字典与表单/列定义、`state` 当前用户与设置、`util` 工具与请求、`router` 路由、`login` 登录与免登、`shell` 布局、`list` 通用列表、`forms` 表单弹窗、`files` 附件与导入、`charts` 图表、`actions` 事件委托、`pages/` 各页面 |
 | `scripts/` | `backup.js`、`restore.js`、`seed.js` |
 | `tests/` | API 集成测试；`tests/e2e/` 浏览器测试 |
 | `docs/` | PRD、验收、审查报告、部署、第三方许可、截图 |
@@ -80,6 +89,6 @@ CRM_URL=http://localhost:3100 CRM_PASSWORD=你的管理员密码 npm run seed
 ## 已知边界
 
 - 架构为单进程 Node + SQLite（数据库文件、定时备份与通知均在进程内），只能单实例运行；实测 6 万条记录下分页列表 60–100ms。需要多实例或更大规模时应迁移至 PostgreSQL。
-- 前端为无构建的原生 JS（约 1500 行），未迁移 React（决策说明见 REVIEW 第五节第 12 项）。
+- 前端为无构建的原生 JS（约 1600 行，按功能拆为 22 个 ES 模块），未迁移 React（决策说明见 REVIEW 第五节第 12 项）。
 - OIDC、企业微信、钉钉已按官方文档实现，并在模拟服务上完成测试，**尚未与真实租户联调**。
 - 未提供：短信通知、SaaS 租户自助注册与计费、字段级权限、AI 辅助功能；未进行第三方渗透测试。
