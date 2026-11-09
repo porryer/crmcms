@@ -496,3 +496,9 @@ code.wrap { display: block; white-space: pre-wrap; word-break: break-all; margin
 .or::before, .or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
 .login-form a.btn.block { justify-content: center; }
 .settings-form.wide-form { max-width: 760px; }
+.sso-btns { display: flex; flex-direction: column; gap: 8px; }
+.sso-wecom .ic { color: #2b7df0; }
+.sso-dingtalk .ic { color: #1677ff; }
+.dropdown .dd-link { display: flex; align-items: center; gap: 8px; width: 100%; padding: 9px 10px; border-radius: 8px; }
+.dropdown .dd-link:hover { background: var(--gray-soft); }
+.howto.small { font-size: 12px; line-height: 1.7; }

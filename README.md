@@ -1,5 +1,7 @@
-# NovaCRM V1.3 · 可离线运行的 Web CRM
+# NovaCRM V1.4 · 可离线运行的 Web CRM
 
+> V1.4：企业微信 / 钉钉扫码登录（含企业微信客户端内免登、个人菜单自助绑定），见 REVIEW 第七节。
+>
 > V1.3：附件纳入备份、Excel 导入导出、邮件通知、两步验证二维码、OIDC 单点登录，见 REVIEW 第六节。
 >
 > V1.2：数据权限、整数分金额、定时备份、HTTPS 部署、导入/附件/对账/自定义字段/通知/多级审批、两步验证、E2E 与 CI，见 REVIEW 第五节与 [docs/DEPLOY.md](docs/DEPLOY.md)。

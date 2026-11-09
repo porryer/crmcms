@@ -202,7 +202,7 @@ test('OIDC single sign-on', async t => {
   assert.equal((await s.req('/settings', { method: 'PUT', body: { sso: { enabled: true, issuer: 'http://127.0.0.1:1', clientId: 'a' } } })).status, 400, '发现文档不可达');
   const st = (await s.req('/settings', { method: 'PUT', body: { sso: { enabled: true, issuer: idp.base, clientId: 'crm-app', clientSecret: 'top-secret', buttonText: '飞书/企业账号登录' } } })).data.settings.sso;
   assert.equal(st.clientSecret, ''); assert.equal(st.secretSet, true); assert.equal(st.redirectUri, 'http://crm.local/api/sso/callback');
-  assert.deepEqual(await (await fetch(s.base + '/api/sso/config')).json(), { enabled: true, buttonText: '飞书/企业账号登录', enforce: false });
+  assert.deepEqual(await (await fetch(s.base + '/api/sso/config')).json(), { enabled: true, buttonText: '飞书/企业账号登录', enforce: false, providers: [{ id: 'oidc', text: '飞书/企业账号登录', url: '/api/sso/start' }] });
 
   // 未开通的账号
   assert.match((await flow()).location, /尚未在系统中开通/);

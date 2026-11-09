@@ -7,7 +7,7 @@
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const { chromium, devices } = require('playwright');
-const { startServer, mockIdp } = require('../helpers');
+const { startServer, mockIdp, mockOpenApi } = require('../helpers');
 /** 在 Node 侧轮询（页面启用严格 CSP，避免 waitForFunction 在部分 Playwright 版本中使用 eval） */
 async function waitFor(fn, timeout = 10000) {
   const end = Date.now() + timeout;
@@ -168,6 +168,39 @@ test('end-to-end smoke', { timeout: 180000 }, async t => {
         await ctx3.close();
       } finally { await s2.stop(); }
     } finally { idp.close(); }
+  });
+
+  await t.test('WeCom / DingTalk QR login and self-binding in the browser', async () => {
+    const api = await mockOpenApi();
+    const s3 = await startServer({ env: { WECOM_API_BASE: api.base, WECOM_LOGIN_BASE: api.base, WECOM_OAUTH_BASE: api.base, DINGTALK_API_BASE: api.base, DINGTALK_LOGIN_BASE: api.base } });
+    try {
+      await s3.req('/settings', { method: 'PUT', body: { wecom: { enabled: true, corpId: 'ww123', agentId: '1000002', secret: 'wecom-secret' }, dingtalk: { enabled: true, clientId: 'dingkey', clientSecret: 'ding-secret', corpId: 'ding-corp' } } });
+      await s3.req('/users', { method: 'POST', body: { email: 'zhao@corp.cn', name: '赵六', password: 'Password!12345', role: 'sales', mobile: '13700000006' } });
+      const ctx = await browser.newContext(); const pg = await ctx.newPage();
+      pg.on('pageerror', e => problems.push('im pageerror: ' + e.message));
+      // 钉钉：按手机号匹配直接登录
+      api.nextDing = { corpId: 'ding-corp', user: { unionId: 'union-zhao', nick: '赵六', mobile: '13700000006' } };
+      await pg.goto(s3.base + '/');
+      await pg.click('#ssoBox a:has-text("钉钉登录")');
+      await pg.waitForSelector('.kpis');
+      // 企业微信：拿不到邮箱/手机 → 提示先绑定
+      api.nextWecom = { userid: 'ZhaoLiu' };
+      const p2 = await (await browser.newContext()).newPage();
+      await p2.goto(s3.base + '/'); await p2.click('#ssoBox a:has-text("企业微信登录")');
+      await p2.waitForSelector('.toast.error');
+      assert.match(await p2.textContent('.toast'), /绑定企业微信/);
+      // 已登录用户在个人菜单绑定企业微信
+      await pg.click('[data-act=user-menu]');
+      await pg.click('a.dd-link:has-text("绑定企业微信")');
+      await pg.waitForSelector('.toast:has-text("已绑定企业微信")');
+      await pg.click('[data-act=user-menu]');
+      assert.ok(await pg.isVisible('[data-act=im-unbind][data-provider=wecom]'));
+      // 现在可以用企业微信扫码登录
+      await p2.goto(s3.base + '/'); await p2.click('#ssoBox a:has-text("企业微信登录")');
+      await p2.waitForSelector('.kpis');
+      assert.match(await p2.textContent('.uname'), /赵六/);
+      await ctx.close();
+    } finally { await s3.stop(); api.close(); }
   });
 
   await t.test('mobile layout', async () => {

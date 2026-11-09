@@ -15,8 +15,10 @@ const XLSX = require('./lib/xlsx');
 const SMTP = require('./lib/smtp');
 const QR = require('./lib/qrcode');
 const OIDC = require('./lib/oidc');
+const WECOM = require('./lib/wecom');
+const DINGTALK = require('./lib/dingtalk');
 
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 const PORT = Number(process.env.PORT || 3100);
 const ROOT = __dirname;
 const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, 'data');
@@ -54,6 +56,12 @@ db.exec('CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NUL
 addColumn('users', 'email_notify', 'email_notify INTEGER NOT NULL DEFAULT 1');
 addColumn('users', 'sso_sub', "sso_sub TEXT NOT NULL DEFAULT ''");
 db.exec('CREATE TABLE IF NOT EXISTS sso_states(state TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,nonce TEXT NOT NULL,verifier TEXT NOT NULL,created_at INTEGER NOT NULL)');
+addColumn('sso_states', 'provider', "provider TEXT NOT NULL DEFAULT 'oidc'");
+addColumn('sso_states', 'bind_user_id', "bind_user_id TEXT NOT NULL DEFAULT ''");
+addColumn('users', 'mobile', "mobile TEXT NOT NULL DEFAULT ''");
+/** 第三方身份绑定（企业微信 userid / 钉钉 unionId），每个成员每种方式最多绑定一个 */
+db.exec(`CREATE TABLE IF NOT EXISTS identities(tenant_id TEXT NOT NULL,provider TEXT NOT NULL,subject TEXT NOT NULL,user_id TEXT NOT NULL,name TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,PRIMARY KEY(tenant_id,provider,subject));
+CREATE UNIQUE INDEX IF NOT EXISTS idx_identity_user ON identities(tenant_id,provider,user_id);`);
 db.exec(`CREATE TABLE IF NOT EXISTS attachments(id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,entity TEXT NOT NULL,entity_id TEXT NOT NULL,name TEXT NOT NULL,mime TEXT NOT NULL,size INTEGER NOT NULL,sha256 TEXT NOT NULL,created_by TEXT NOT NULL,created_at TEXT NOT NULL,deleted INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS idx_attach_entity ON attachments(tenant_id,entity,entity_id,deleted);`);
 db.exec(`
@@ -109,6 +117,10 @@ const DEFAULT_SETTINGS = {
   smtp: { enabled: false, host: '', port: 465, secure: 'ssl', user: '', pass: '', from: '', events: ['approval', 'assign', 'digest'] },
   /** 单点登录（OpenID Connect） */
   sso: { enabled: false, issuer: '', clientId: '', clientSecret: '', buttonText: '企业账号登录', autoCreate: false, defaultRole: 'sales', defaultDept: '', enforce: false },
+  /** 企业微信登录（自建应用：CorpID / AgentId / Secret） */
+  wecom: { enabled: false, corpId: '', agentId: '', secret: '', buttonText: '企业微信登录', autoCreate: false, defaultRole: 'sales', defaultDept: '' },
+  /** 钉钉登录（企业内部应用：AppKey / AppSecret / CorpId） */
+  dingtalk: { enabled: false, clientId: '', clientSecret: '', corpId: '', buttonText: '钉钉登录', autoCreate: false, defaultRole: 'sales', defaultDept: '' },
   logo: '',
 };
 const CUSTOM_FIELD_TYPES = ['text', 'textarea', 'number', 'date', 'select'];
@@ -312,13 +324,17 @@ function getSettings(tenantId) {
     webhook: { ...DEFAULT_SETTINGS.webhook, ...(s.webhook || {}) },
     smtp: { ...DEFAULT_SETTINGS.smtp, ...(s.smtp || {}) },
     sso: { ...DEFAULT_SETTINGS.sso, ...(s.sso || {}) },
+    wecom: { ...DEFAULT_SETTINGS.wecom, ...(s.wecom || {}) },
+    dingtalk: { ...DEFAULT_SETTINGS.dingtalk, ...(s.dingtalk || {}) },
   };
 }
 /** 返回给前端的设置：Webhook 地址含密钥，仅管理员可见 */
 function publicSettings(u) {
   const st = getSettings(u.tenant_id);
-  if (u.role !== 'admin') { st.webhook = { configured: !!st.webhook.url }; st.smtp = { enabled: !!st.smtp.enabled }; st.sso = { enabled: !!st.sso.enabled }; }
-  else { st.smtp = { ...st.smtp, pass: '', passSet: !!st.smtp.pass }; st.sso = { ...st.sso, clientSecret: '', secretSet: !!st.sso.clientSecret, redirectUri: ssoRedirectUri() }; }
+  if (u.role !== 'admin') { st.webhook = { configured: !!st.webhook.url }; st.smtp = { enabled: !!st.smtp.enabled }; st.sso = { enabled: !!st.sso.enabled }; st.wecom = { enabled: !!st.wecom.enabled }; st.dingtalk = { enabled: !!st.dingtalk.enabled }; }
+  else { st.smtp = { ...st.smtp, pass: '', passSet: !!st.smtp.pass }; st.sso = { ...st.sso, clientSecret: '', secretSet: !!st.sso.clientSecret, redirectUri: ssoRedirectUri() };
+    st.wecom = { ...st.wecom, secret: '', secretSet: !!st.wecom.secret, redirectUri: ssoRedirectUri(null, 'wecom') };
+    st.dingtalk = { ...st.dingtalk, clientSecret: '', secretSet: !!st.dingtalk.clientSecret, redirectUri: ssoRedirectUri(null, 'dingtalk') }; }
   return st;
 }
 const customFieldsOf = (u, type) => (u ? getSettings(u.tenant_id).customFields?.[type] || [] : []);
@@ -1019,9 +1035,18 @@ function validateApproval(input) {
 // ---------- 单点登录（OIDC） ----------
 /** 登录页所属租户：SSO_TENANT 环境变量或最早创建的租户（单租户安装） */
 const ssoTenantId = () => process.env.SSO_TENANT || db.prepare('SELECT id FROM tenants ORDER BY created_at LIMIT 1').get()?.id;
-function ssoRedirectUri(req) {
+function ssoRedirectUri(req, provider = 'oidc') {
   const origin = publicOrigin() || (req ? `${process.env.COOKIE_SECURE === '1' ? 'https' : 'http'}://${req.headers.host}` : '');
-  return origin ? origin + '/api/sso/callback' : '(请设置 PUBLIC_ORIGIN)';
+  return origin ? origin + (provider === 'oidc' ? '/api/sso/callback' : `/api/sso/${provider}/callback`) : '(请设置 PUBLIC_ORIGIN)';
+}
+const PROVIDER_NAME = { oidc: '单点登录', wecom: '企业微信', dingtalk: '钉钉' };
+/** 已启用的登录方式（登录页按钮） */
+function enabledProviders(st) {
+  const list = [];
+  if (st.sso.enabled) list.push({ id: 'oidc', text: st.sso.buttonText || '企业账号登录', url: '/api/sso/start' });
+  if (st.wecom.enabled) list.push({ id: 'wecom', text: st.wecom.buttonText || '企业微信登录', url: '/api/sso/wecom/start' });
+  if (st.dingtalk.enabled) list.push({ id: 'dingtalk', text: st.dingtalk.buttonText || '钉钉登录', url: '/api/sso/dingtalk/start' });
+  return list;
 }
 const validIssuer = url => { try { const x = new URL(url); return x.protocol === 'https:' || (x.protocol === 'http:' && process.env.SSO_ALLOW_HTTP === '1'); } catch { return false; } };
 function redirect(res, location, headers = {}) { res.writeHead(302, { Location: location, 'Cache-Control': 'no-store', ...headers }); res.end(); }
@@ -1032,7 +1057,7 @@ async function ssoStart(req, res) {
   if (!cfg.enabled) return ssoFail(res, '未启用单点登录');
   db.prepare('DELETE FROM sso_states WHERE created_at<?').run(Date.now() - 10 * 60 * 1000);
   const state = crypto.randomBytes(24).toString('base64url'), nonce = crypto.randomBytes(24).toString('base64url'), { verifier, challenge } = OIDC.pkce();
-  db.prepare('INSERT INTO sso_states VALUES(?,?,?,?,?)').run(state, tenantId, nonce, verifier, Date.now());
+  db.prepare("INSERT INTO sso_states(state,tenant_id,nonce,verifier,created_at,provider) VALUES(?,?,?,?,?,'oidc')").run(state, tenantId, nonce, verifier, Date.now());
   try { return redirect(res, await OIDC.authorizeUrl(cfg, { state, nonce, challenge, redirectUri: ssoRedirectUri(req) })); }
   catch (e) { logJson({ type: 'sso_error', stage: 'start', message: e.message }); return ssoFail(res, '无法连接身份提供方：' + e.message); }
 }
@@ -1041,7 +1066,7 @@ async function ssoCallback(req, res, url) {
   if (q.get('error')) return ssoFail(res, `身份提供方返回错误：${q.get('error_description') || q.get('error')}`);
   const st = db.prepare('SELECT * FROM sso_states WHERE state=?').get(String(q.get('state') || ''));
   if (st) db.prepare('DELETE FROM sso_states WHERE state=?').run(st.state); // 一次性
-  if (!st || Date.now() - st.created_at > 10 * 60 * 1000) return ssoFail(res, '登录请求已失效，请重试');
+  if (!st || st.provider !== 'oidc' || Date.now() - st.created_at > 10 * 60 * 1000) return ssoFail(res, '登录请求已失效，请重试');
   const cfg = getSettings(st.tenant_id).sso;
   if (!cfg.enabled) return ssoFail(res, '未启用单点登录');
   let claims;
@@ -1067,6 +1092,76 @@ async function ssoCallback(req, res, url) {
   createSession(user, res);
   db.prepare('UPDATE users SET last_login_at=? WHERE id=?').run(now(), user.id);
   audit(user, 'login', 'session', user.id, { via: 'sso' });
+  res.writeHead(302, { Location: '/#/dashboard', 'Cache-Control': 'no-store' });
+  res.end();
+}
+
+// ---------- 企业微信 / 钉钉 扫码登录 ----------
+const IM = { wecom: WECOM, dingtalk: DINGTALK };
+/** 发起登录；bind=1 时需已登录，回调后把第三方身份绑定到当前账号 */
+async function imStart(req, res, url, provider) {
+  const bindUser = url.searchParams.get('bind') === '1' ? authenticate(req) : null;
+  if (url.searchParams.get('bind') === '1' && !bindUser) return ssoFail(res, '请先登录后再绑定');
+  const tenantId = bindUser ? bindUser.tenant_id : ssoTenantId(), cfg = getSettings(tenantId)[provider];
+  if (!cfg.enabled) return ssoFail(res, `未启用${PROVIDER_NAME[provider]}登录`);
+  const state = crypto.randomBytes(24).toString('base64url');
+  db.prepare('INSERT INTO sso_states(state,tenant_id,nonce,verifier,created_at,provider,bind_user_id) VALUES(?,?,?,?,?,?,?)').run(state, tenantId, '', '', Date.now(), provider, bindUser?.id || '');
+  return redirect(res, IM[provider].authorizeUrl(cfg, { state, redirectUri: ssoRedirectUri(req, provider), inApp: provider === 'wecom' && WECOM.isInApp(req.headers['user-agent']) }));
+}
+const normMobile = m => String(m || '').replace(/\D/g, '').slice(-11);
+async function imCallback(req, res, url, provider) {
+  const q = url.searchParams, name = PROVIDER_NAME[provider];
+  const st = db.prepare('SELECT * FROM sso_states WHERE state=?').get(String(q.get('state') || ''));
+  if (st) db.prepare('DELETE FROM sso_states WHERE state=?').run(st.state);
+  if (!st || st.provider !== provider || Date.now() - st.created_at > 10 * 60 * 1000) return ssoFail(res, '登录请求已失效，请重试');
+  const code = String(q.get('authCode') || q.get('code') || '');
+  if (!code) return ssoFail(res, `${name}未返回授权码（用户可能取消了授权）`);
+  const cfg = getSettings(st.tenant_id)[provider];
+  if (!cfg.enabled) return ssoFail(res, `未启用${name}登录`);
+  let who;
+  try { who = await IM[provider].identify(cfg, code); }
+  catch (e) { logJson({ type: 'sso_error', provider, message: e.message }); return ssoFail(res, e.message); }
+  const bound = db.prepare('SELECT * FROM identities WHERE tenant_id=? AND provider=? AND subject=?').get(st.tenant_id, provider, who.subject);
+  const bind = userId => db.prepare('INSERT OR REPLACE INTO identities(tenant_id,provider,subject,user_id,name,created_at) VALUES(?,?,?,?,?,?)').run(st.tenant_id, provider, who.subject, userId, String(who.name || '').slice(0, 100), now());
+
+  // ---- 绑定模式：已登录用户把第三方身份绑定到自己 ----
+  if (st.bind_user_id) {
+    const me = db.prepare('SELECT * FROM users WHERE id=? AND active=1').get(st.bind_user_id);
+    if (!me) return ssoFail(res, '账号不存在或已停用');
+    if (bound && bound.user_id !== me.id) return ssoFail(res, `该${name}账号已绑定其他成员，请联系管理员`);
+    db.prepare('DELETE FROM identities WHERE tenant_id=? AND provider=? AND user_id=?').run(st.tenant_id, provider, me.id);
+    bind(me.id);
+    audit(me, 'bind', 'users', me.id, { provider, subject: who.subject });
+    return redirect(res, '/#/dashboard?sso_ok=' + encodeURIComponent(`已绑定${name}账号${who.name ? '：' + who.name : ''}`));
+  }
+
+  // ---- 登录：已绑定 → 邮箱 → 手机号 → 自动开通 ----
+  let user = bound ? db.prepare('SELECT * FROM users WHERE id=?').get(bound.user_id) : null;
+  const email = String(who.email || '').trim().toLowerCase(), mobile = normMobile(who.mobile);
+  if (!user && email) user = db.prepare('SELECT * FROM users WHERE tenant_id=? AND email=?').get(st.tenant_id, email);
+  if (!user && mobile.length === 11) {
+    const hits = db.prepare('SELECT * FROM users WHERE tenant_id=? AND mobile<>\'\'').all(st.tenant_id).filter(x => normMobile(x.mobile) === mobile);
+    if (hits.length === 1) user = hits[0];
+  }
+  if (user && !user.active) return ssoFail(res, '账号已停用，请联系管理员');
+  if (user && !bound) {
+    const other = db.prepare('SELECT subject FROM identities WHERE tenant_id=? AND provider=? AND user_id=?').get(st.tenant_id, provider, user.id);
+    if (other) return ssoFail(res, `该成员已绑定其他${name}账号，请联系管理员`);
+  }
+  if (!user) {
+    if (!cfg.autoCreate || !/^\S+@\S+\.\S+$/.test(email)) {
+      return ssoFail(res, `未找到与该${name}账号对应的成员。请先用账号密码登录，在右上角个人菜单中“绑定${name}”；或请管理员在团队管理中填写手机号/邮箱`);
+    }
+    const uid = newId();
+    db.prepare('INSERT INTO users(id,tenant_id,email,password_hash,role,display_name,active,created_at,department,data_scope,mobile) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+      .run(uid, st.tenant_id, email, hashPwd(crypto.randomBytes(32).toString('hex')), ['sales', 'viewer', 'manager'].includes(cfg.defaultRole) ? cfg.defaultRole : 'sales', String(who.name || email.split('@')[0]).slice(0, 100), 1, now(), String(cfg.defaultDept || '').slice(0, 50), '', String(who.mobile || '').slice(0, 30));
+    user = db.prepare('SELECT * FROM users WHERE id=?').get(uid);
+    audit(user, 'create', 'users', uid, { via: provider, email });
+  }
+  if (!bound) bind(user.id);
+  createSession(user, res);
+  db.prepare('UPDATE users SET last_login_at=? WHERE id=?').run(now(), user.id);
+  audit(user, 'login', 'session', user.id, { via: provider });
   res.writeHead(302, { Location: '/#/dashboard', 'Cache-Control': 'no-store' });
   res.end();
 }
@@ -1307,7 +1402,8 @@ function statement(u, accountId, from, to) {
 
 // ---------- 用户管理 ----------
 function listUsers(u) {
-  return db.prepare('SELECT id,email,role,display_name name,department,active,created_at createdAt,last_login_at lastLoginAt,data_scope dataScope,totp_enabled mfaEnabled,length(sso_sub)>0 ssoBound FROM users WHERE tenant_id=? ORDER BY created_at').all(u.tenant_id)
+  return db.prepare('SELECT id,email,role,display_name name,department,active,created_at createdAt,last_login_at lastLoginAt,data_scope dataScope,totp_enabled mfaEnabled,length(sso_sub)>0 ssoBound,mobile,(SELECT group_concat(provider) FROM identities i WHERE i.user_id=users.id) identities FROM users WHERE tenant_id=? ORDER BY created_at').all(u.tenant_id)
+    .map(x => ({ ...x, identities: x.identities ? x.identities.split(',') : [] }))
     .map(x => ({ ...x, dataScopeSet: x.dataScope || '', dataScope: DATA_SCOPES.includes(x.dataScope) ? x.dataScope : DEFAULT_SCOPE[x.role] }))
     .map(x => (canManage(u) ? x : { id: x.id, name: x.name, role: x.role, department: x.department, active: x.active }));
 }
@@ -1322,6 +1418,7 @@ async function createUser(u, req) {
     const dataScope = DATA_SCOPES.includes(b.dataScope) ? b.dataScope : '';
     db.prepare('INSERT INTO users(id,tenant_id,email,password_hash,role,display_name,active,created_at,department,data_scope) VALUES(?,?,?,?,?,?,?,?,?,?)')
       .run(uid, u.tenant_id, email, hashPwd(password), role, String(b.name || email).slice(0, 100), 1, now(), String(b.department || '').slice(0, 50), dataScope);
+    if (b.mobile) db.prepare('UPDATE users SET mobile=? WHERE id=?').run(String(b.mobile).trim().slice(0, 30), uid);
   } catch { boom(409, '邮箱已存在'); }
   audit(u, 'create', 'users', uid, { email, role });
   return { id: uid };
@@ -1353,7 +1450,8 @@ async function updateUser(u, req, userId) {
     if (next.display_name !== target.display_name) db.prepare("UPDATE records SET data=json_set(data,'$.owner',?) WHERE tenant_id=? AND json_extract(data,'$.ownerId')=?").run(next.display_name, u.tenant_id, target.id);
     if (resetPassword) db.prepare('UPDATE users SET password_hash=? WHERE id=?').run(hashPwd(String(b.password)), target.id);
     if (resetMfa) db.prepare("UPDATE users SET totp_enabled=0,totp_secret='' WHERE id=?").run(target.id);
-    if (b.unbindSso === true) db.prepare("UPDATE users SET sso_sub='' WHERE id=?").run(target.id);
+    if (b.unbindSso === true) { db.prepare("UPDATE users SET sso_sub='' WHERE id=?").run(target.id); db.prepare('DELETE FROM identities WHERE user_id=?').run(target.id); }
+    if (b.mobile !== undefined) db.prepare('UPDATE users SET mobile=? WHERE id=?').run(String(b.mobile).trim().slice(0, 30), target.id);
     if (resetPassword || resetMfa || !next.active || next.role !== target.role) db.prepare('DELETE FROM sessions WHERE user_id=?').run(target.id);
     audit(u, 'update', 'users', target.id, { before: { name: target.display_name, role: target.role, department: target.department, active: target.active, dataScope: target.data_scope }, resetPassword, resetMfa });
   });
@@ -1373,9 +1471,11 @@ async function api(req, res, url) {
   }
 
   if (p === '/api/sso/config' && m === 'GET') {
-    const cfg = getSettings(ssoTenantId()).sso;
-    return send(res, 200, { enabled: !!cfg.enabled, buttonText: cfg.buttonText || '企业账号登录', enforce: !!cfg.enforce });
+    const st = getSettings(ssoTenantId()), providers = enabledProviders(st);
+    return send(res, 200, { enabled: !!st.sso.enabled, buttonText: st.sso.buttonText || '企业账号登录', enforce: !!st.sso.enforce && providers.length > 0, providers });
   }
+  const imMatch = p.match(/^\/api\/sso\/(wecom|dingtalk)\/(start|callback)$/);
+  if (imMatch && m === 'GET') return imMatch[2] === 'start' ? imStart(req, res, url, imMatch[1]) : imCallback(req, res, url, imMatch[1]);
   if (p === '/api/sso/start' && m === 'GET') return ssoStart(req, res);
   if (p === '/api/sso/callback' && m === 'GET') return ssoCallback(req, res, url);
 
@@ -1386,8 +1486,8 @@ async function api(req, res, url) {
     if (loginBlocked(keys)) boom(429, '登录失败次数过多，请 15 分钟后再试');
     const found = db.prepare('SELECT * FROM users WHERE email=? AND active=1').all(email).find(x => verifyPwd(String(b.password || ''), x.password_hash));
     if (!found) { recordLoginFailure(keys); boom(401, '邮箱或密码错误'); }
-    const ssoCfg = getSettings(found.tenant_id).sso;
-    if (ssoCfg.enabled && ssoCfg.enforce && found.role !== 'admin') boom(403, `本企业已启用单点登录，请点击“${ssoCfg.buttonText || '企业账号登录'}”`);
+    const tst = getSettings(found.tenant_id), provs = enabledProviders(tst);
+    if (tst.sso.enforce && provs.length && found.role !== 'admin') boom(403, `本企业已启用单点登录，请使用${provs.map(x => `“${x.text}”`).join('或')}登录`);
     if (found.totp_enabled) {
       // 密码正确但未提供动态码：提示前端进入第二步，不计失败
       if (!b.otp) return send(res, 401, { error: '请输入身份验证器中的 6 位动态码', mfaRequired: true });
@@ -1406,7 +1506,13 @@ async function api(req, res, url) {
   if (!u) boom(401, '请先登录');
   req.uid = u.id;
 
-  if (p === '/api/me' && m === 'GET') return send(res, 200, { user: publicUser(u), settings: publicSettings(u) });
+  if (p === '/api/me' && m === 'GET') return send(res, 200, { user: { ...publicUser(u), identities: db.prepare('SELECT provider,name FROM identities WHERE user_id=?').all(u.id) }, settings: publicSettings(u), providers: enabledProviders(getSettings(u.tenant_id)) });
+  if (p === '/api/me/identities' && m === 'DELETE') {
+    const prov = url.searchParams.get('provider');
+    db.prepare('DELETE FROM identities WHERE user_id=? AND provider=?').run(u.id, prov);
+    audit(u, 'unbind', 'users', u.id, { provider: prov });
+    return send(res, 200, { ok: true });
+  }
   if (p === '/api/logout' && m === 'POST') {
     db.prepare('DELETE FROM sessions WHERE id_hash=?').run(tokenHash(sessionToken(req)));
     res.setHeader('Set-Cookie', makeCookie('', 0));
@@ -1504,6 +1610,26 @@ async function api(req, res, url) {
         }
         next.sso = sso;
       }
+      for (const prov of ['wecom', 'dingtalk']) {
+        if (b[prov] === undefined) continue;
+        const x = b[prov] || {}, c0 = cur[prov], secretKey = prov === 'wecom' ? 'secret' : 'clientSecret';
+        const t = (k, n = 200) => String(x[k] ?? c0[k]).trim().slice(0, n);
+        const cfg = {
+          enabled: x.enabled !== undefined ? !!x.enabled : c0.enabled,
+          ...(prov === 'wecom' ? { corpId: t('corpId'), agentId: t('agentId', 30) } : { clientId: t('clientId'), corpId: t('corpId') }),
+          [secretKey]: x[secretKey] ? String(x[secretKey]).slice(0, 500) : (x.clearSecret ? '' : c0[secretKey]),
+          buttonText: t('buttonText', 30) || DEFAULT_SETTINGS[prov].buttonText,
+          autoCreate: x.autoCreate !== undefined ? !!x.autoCreate : c0.autoCreate,
+          defaultRole: ['sales', 'viewer', 'manager'].includes(x.defaultRole) ? x.defaultRole : c0.defaultRole,
+          defaultDept: t('defaultDept', 50),
+        };
+        if (cfg.enabled) {
+          if (prov === 'wecom' && (!cfg.corpId || !/^\d+$/.test(cfg.agentId) || !cfg.secret)) boom(400, '请完整填写企业 ID（CorpID）、应用 AgentId（数字）和应用 Secret');
+          if (prov === 'dingtalk' && (!cfg.clientId || !cfg.clientSecret || !cfg.corpId)) boom(400, '请完整填写 AppKey（Client ID）、AppSecret 和企业 CorpId');
+          try { await IM[prov].verifyConfig(cfg); } catch (e) { boom(400, `${PROVIDER_NAME[prov]}配置校验失败：${e.message}`); }
+        }
+        next[prov] = cfg;
+      }
       if (b.webhook !== undefined) {
         const w = b.webhook || {};
         const url = String(w.url ?? cur.webhook.url).trim();
@@ -1511,7 +1637,7 @@ async function api(req, res, url) {
         next.webhook = { url, kind: ['wecom', 'dingtalk', 'generic'].includes(w.kind) ? w.kind : cur.webhook.kind, events: Array.isArray(w.events) ? w.events.filter(e => WEBHOOK_EVENTS.includes(e)) : cur.webhook.events };
       }
       db.prepare('UPDATE tenants SET settings=?,name=? WHERE id=?').run(JSON.stringify(next), next.companyName, u.tenant_id);
-      audit(u, 'update', 'settings', u.tenant_id, { before: { ...cur, webhook: { ...cur.webhook, url: cur.webhook.url ? '***' : '' }, smtp: { ...cur.smtp, pass: cur.smtp.pass ? '***' : '' }, sso: { ...cur.sso, clientSecret: cur.sso.clientSecret ? '***' : '' } } });
+      audit(u, 'update', 'settings', u.tenant_id, { before: { ...cur, webhook: { ...cur.webhook, url: cur.webhook.url ? '***' : '' }, smtp: { ...cur.smtp, pass: cur.smtp.pass ? '***' : '' }, sso: { ...cur.sso, clientSecret: cur.sso.clientSecret ? '***' : '' }, wecom: { ...cur.wecom, secret: cur.wecom.secret ? '***' : '' }, dingtalk: { ...cur.dingtalk, clientSecret: cur.dingtalk.clientSecret ? '***' : '' } } });
       return send(res, 200, { settings: publicSettings(u) });
     }
   }

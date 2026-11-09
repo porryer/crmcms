@@ -82,6 +82,8 @@ const MENU = [
   { key: 'settings', label: '系统设置', icon: 'gear', roles: ['admin', 'manager'] },
 ];
 const IMPORTABLE = ['leads', 'accounts', 'contacts', 'opportunities'];
+const PROVIDER_ICON = { oidc: 'shield', wecom: 'message', dingtalk: 'bell' };
+const PROVIDER_NAME = { oidc: '单点登录', wecom: '企业微信', dingtalk: '钉钉' };
 const PAGE_TITLE = { dashboard: '工作台', leads: '线索管理', accounts: '客户管理', contacts: '联系人', opportunities: '商机管理', contracts: '合同订单', finance: '财务回款', tasks: '跟进任务', activities: '跟进记录', reports: '数据报表', team: '团队管理', settings: '系统设置' };
 
 // ======================= 表单字段定义 =======================
@@ -215,6 +217,7 @@ window.addEventListener('hashchange', () => route());
 async function route() {
   if (!me) return renderLogin();
   const r = parseRoute();
+  if (r.params.get('sso_ok')) { toast(r.params.get('sso_ok')); history.replaceState(null, '', location.pathname + '#/' + r.page); me = (await request('/me').catch(() => ({ user: me }))).user; $('#shell')?.remove(); }
   if (r.page === 'settings' && !canManage()) return go('#/dashboard');
   renderShell(r);
   const content = $('#content');
@@ -273,8 +276,8 @@ function renderLogin() {
   const ssoErr = new URLSearchParams(location.hash.split('?')[1] || '').get('sso_error');
   if (ssoErr) { toast(ssoErr, true); history.replaceState(null, '', location.pathname); }
   fetch('/api/sso/config').then(r => r.json()).then(c => {
-    if (!c.enabled || !$('#ssoBox')) return;
-    $('#ssoBox').innerHTML = `<div class="or"><span>或</span></div><a class="btn light block" href="/api/sso/start">${icon('shield')}${esc(c.buttonText)}</a>${c.enforce ? '<p class="muted small center">本企业已启用单点登录，仅管理员可使用密码登录</p>' : ''}`;
+    if (!c.providers?.length || !$('#ssoBox')) return;
+    $('#ssoBox').innerHTML = `<div class="or"><span>或</span></div><div class="sso-btns">${c.providers.map(p => `<a class="btn light block sso-${p.id}" href="${esc(p.url)}">${icon(PROVIDER_ICON[p.id] || 'shield')}${esc(p.text)}</a>`).join('')}</div>${c.enforce ? '<p class="muted small center">本企业已启用单点登录，仅管理员可使用密码登录</p>' : ''}`;
   }).catch(() => {});
   $('#loginForm').addEventListener('submit', async e => {
     e.preventDefault();
@@ -284,6 +287,7 @@ function renderLogin() {
       const r = await API.post('/login', { email: f.email, password: f.password, ...(f.otp ? { otp: f.otp } : {}) });
       try { if (f.remember) localStorage.setItem('novacrm.email', f.email); else localStorage.removeItem('novacrm.email'); } catch { /* ignore */ }
       me = r.user; settings = r.settings;
+      try { const m2 = await request('/me'); me = m2.user; ui.providers = m2.providers || []; } catch { /* ignore */ }
       if (!location.hash || location.hash === '#/') location.hash = '#/dashboard'; else route();
     } catch (err) {
       btn.disabled = false;
@@ -313,7 +317,7 @@ function renderShell(r) {
   const shell = $('#shell');
   const html = `
     <aside class="aside" id="aside">
-      <a class="brand" href="#/dashboard">${settings.logo ? `<img class="logo img" src="/api/settings/logo?v=${encodeURIComponent(settings.logoV || '')}" alt="">` : '<span class="logo">N</span>'}<span class="navtext">${esc(settings.systemName)}</span><small class="navtext">V1.3</small></a>
+      <a class="brand" href="#/dashboard">${settings.logo ? `<img class="logo img" src="/api/settings/logo?v=${encodeURIComponent(settings.logoV || '')}" alt="">` : '<span class="logo">N</span>'}<span class="navtext">${esc(settings.systemName)}</span><small class="navtext">V1.4</small></a>
       <nav>${items}</nav>
       <div class="side-bottom navtext">${esc(settings.companyName)}<br><span>企业版 · 数据本地存储</span></div>
     </aside>
@@ -330,6 +334,7 @@ function renderShell(r) {
             <div class="dd-head"><b>${esc(me.name)}</b><small>${esc(me.email)} · ${ROLE_LABEL[me.role]}</small></div>
             <button data-act="password">${icon('key')}修改密码</button>
             <button data-act="mfa">${icon('shield')}两步验证${me.mfaEnabled ? '（已启用）' : ''}</button>
+            ${(ui.providers || []).filter(p => p.id !== 'oidc').map(p => { const b = (me.identities || []).find(x => x.provider === p.id); return b ? `<button data-act="im-unbind" data-provider="${p.id}">${icon(PROVIDER_ICON[p.id])}已绑定${PROVIDER_NAME[p.id]}${b.name ? '（' + esc(b.name) + '）' : ''}·解绑</button>` : `<a class="dd-link" href="/api/sso/${p.id}/start?bind=1">${icon(PROVIDER_ICON[p.id])}绑定${PROVIDER_NAME[p.id]}</a>`; }).join('')}
             ${settings.smtp?.enabled ? `<button data-act="email-toggle">${icon('mail')}邮件通知：${me.emailNotify ? '已开启' : '已关闭'}</button>` : ''}
             <button data-act="logout">${icon('logout')}退出登录</button>
           </div>
@@ -1091,8 +1096,8 @@ async function pageReports() {
 async function pageTeam() {
   const items = R.users;
   $('#content').innerHTML = pageHead('团队管理', '成员、部门、角色与权限', isAdmin() ? `<button class="btn" data-act="user-create">${icon('plus')}新增成员</button>` : '') + `
-    <section class="panel flush"><div class="tbl-wrap"><table><thead><tr><th>姓名</th>${canManage() ? '<th>账号</th>' : ''}<th>部门</th><th>角色</th>${canManage() ? '<th>数据范围</th><th>两步验证</th>' : ''}<th>状态</th>${canManage() ? '<th>最近登录</th>' : ''}${isAdmin() ? '<th class="ops">操作</th>' : ''}</tr></thead><tbody>
-      ${items.map(u => `<tr><td><span class="who">${avatar(u.name, 'blue')}<b>${esc(u.name)}</b>${u.id === me.id ? '<span class="tag gray">我</span>' : ''}</span></td>${canManage() ? `<td>${esc(u.email)}</td>` : ''}<td>${esc(u.department || '—')}</td><td><span class="tag ${u.role === 'admin' ? 'red' : u.role === 'manager' ? 'orange' : u.role === 'sales' ? 'blue' : 'gray'}">${ROLE_LABEL[u.role]}</span></td>${canManage() ? `<td>${SCOPE_LABEL[u.dataScope] || '—'}</td><td>${u.mfaEnabled ? '<span class="tag green">已启用</span>' : '<span class="muted">未启用</span>'}${u.ssoBound ? ' <span class="tag blue" title="已绑定单点登录身份">SSO</span>' : ''}</td>` : ''}<td><span class="dot ${u.active ? 'on' : 'off'}"></span>${u.active ? '正常' : '停用'}</td>${canManage() ? `<td>${u.lastLoginAt ? fmtDateTime(u.lastLoginAt) : '—'}</td>` : ''}${isAdmin() ? `<td class="ops"><div class="row-actions"><button class="textbtn" data-act="user-edit" data-id="${esc(u.id)}">编辑</button>${u.mfaEnabled && u.id !== me.id ? `<button class="textbtn" data-act="user-mfa-reset" data-id="${esc(u.id)}">重置验证</button>` : ''}${u.ssoBound ? `<button class="textbtn" data-act="user-sso-unbind" data-id="${esc(u.id)}">解绑SSO</button>` : ''}${u.id !== me.id ? `<button class="textbtn ${u.active ? 'danger' : ''}" data-act="user-toggle" data-id="${esc(u.id)}">${u.active ? '停用' : '启用'}</button>` : ''}</div></td>` : ''}</tr>`).join('')}
+    <section class="panel flush"><div class="tbl-wrap"><table><thead><tr><th>姓名</th>${canManage() ? '<th>账号</th>' : ''}<th>部门</th><th>角色</th>${canManage() ? '<th>数据范围</th><th>两步验证 / 登录绑定</th>' : ''}<th>状态</th>${canManage() ? '<th>最近登录</th>' : ''}${isAdmin() ? '<th class="ops">操作</th>' : ''}</tr></thead><tbody>
+      ${items.map(u => `<tr><td><span class="who">${avatar(u.name, 'blue')}<b>${esc(u.name)}</b>${u.id === me.id ? '<span class="tag gray">我</span>' : ''}</span></td>${canManage() ? `<td>${esc(u.email)}</td>` : ''}<td>${esc(u.department || '—')}</td><td><span class="tag ${u.role === 'admin' ? 'red' : u.role === 'manager' ? 'orange' : u.role === 'sales' ? 'blue' : 'gray'}">${ROLE_LABEL[u.role]}</span></td>${canManage() ? `<td>${SCOPE_LABEL[u.dataScope] || '—'}</td><td>${u.mfaEnabled ? '<span class="tag green">已启用</span>' : '<span class="muted">未启用</span>'}${u.ssoBound ? ' <span class="tag blue" title="已绑定单点登录身份">SSO</span>' : ''}${(u.identities || []).map(p => ` <span class="tag blue">${PROVIDER_NAME[p]}</span>`).join('')}</td>` : ''}<td><span class="dot ${u.active ? 'on' : 'off'}"></span>${u.active ? '正常' : '停用'}</td>${canManage() ? `<td>${u.lastLoginAt ? fmtDateTime(u.lastLoginAt) : '—'}</td>` : ''}${isAdmin() ? `<td class="ops"><div class="row-actions"><button class="textbtn" data-act="user-edit" data-id="${esc(u.id)}">编辑</button>${u.mfaEnabled && u.id !== me.id ? `<button class="textbtn" data-act="user-mfa-reset" data-id="${esc(u.id)}">重置验证</button>` : ''}${u.ssoBound || u.identities?.length ? `<button class="textbtn" data-act="user-sso-unbind" data-id="${esc(u.id)}">解绑登录</button>` : ''}${u.id !== me.id ? `<button class="textbtn ${u.active ? 'danger' : ''}" data-act="user-toggle" data-id="${esc(u.id)}">${u.active ? '停用' : '启用'}</button>` : ''}</div></td>` : ''}</tr>`).join('')}
     </tbody></table></div></section>
     <section class="panel"><h3>角色权限说明</h3><div class="tbl-wrap plain"><table><thead><tr><th>角色</th><th>查看</th><th>新增/编辑</th><th>删除</th><th>合同审批</th><th>导出</th><th>审计日志</th><th>成员与系统设置</th></tr></thead><tbody>
       ${[['管理员', 1, 1, 1, 1, 1, 1, 1], ['销售经理', 1, 1, 1, 1, 1, 1, 0], ['销售', 1, 1, 0, 0, 1, 0, 0], ['只读', 1, 0, 0, 0, 0, 0, 0]].map(([n, ...f]) => `<tr><td><b>${n}</b></td>${f.map(v => `<td>${v ? '<span class="ok">✓</span>' : '<span class="muted">—</span>'}</td>`).join('')}</tr>`).join('')}
@@ -1106,6 +1111,7 @@ function userModal(u = null) {
       <label class="fld"><span>姓名 <i class="req">*</i></span><input class="field" name="name" required maxlength="100" value="${esc(u?.name || '')}"></label>
       <label class="fld"><span>登录邮箱 <i class="req">*</i></span><input class="field" name="email" type="email" ${u ? 'disabled' : 'required'} value="${esc(u?.email || '')}"></label>
       <label class="fld"><span>部门</span><select class="field" name="department">${deptOpts}</select></label>
+      <label class="fld"><span>手机号（用于钉钉/企业微信登录匹配）</span><input class="field" name="mobile" type="tel" maxlength="30" value="${esc(u?.mobile || '')}"></label>
       <label class="fld"><span>角色</span><select class="field" name="role" ${u?.id === me.id ? 'disabled' : ''}>${Object.entries(ROLE_LABEL).map(([k, l]) => `<option value="${k}" ${(u?.role || 'sales') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       <label class="fld"><span>数据范围</span><select class="field" name="dataScope"><option value="">按角色默认</option>${Object.entries(SCOPE_LABEL).map(([k, l]) => `<option value="${k}" ${u?.dataScopeSet === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       <label class="fld wide"><span>${u ? '重置密码（留空不修改，至少12位）' : '初始密码（至少12位）'} ${u ? '' : '<i class="req">*</i>'}</span><input class="field" name="password" type="password" minlength="12" autocomplete="new-password" ${u ? '' : 'required'}></label></div>`,
@@ -1166,9 +1172,44 @@ async function pageSettings() {
         <label class="fld"><span>自动开通账号的默认部门</span><select class="field" name="defaultDept">${optionList('dict:departments', c.defaultDept || '', '不指定')}</select></label>
       </div>
       <label class="check"><input type="checkbox" name="autoCreate" ${c.autoCreate ? 'checked' : ''}> 首次登录自动开通账号（否则需管理员先在“团队管理”中添加相同邮箱的成员）</label>
-      <label class="check"><input type="checkbox" name="enforce" ${c.enforce ? 'checked' : ''}> 强制单点登录（非管理员不能使用密码登录；管理员保留密码登录用于应急）</label>
       <div class="tools"><button class="btn" type="submit">保存</button>${c.enabled ? '<a class="btn light" href="/api/sso/start" target="_blank" rel="noopener">在新窗口测试登录</a>' : ''}</div>
       <p class="muted small">按邮箱匹配成员，首次登录后与 IdP 的用户标识（sub）绑定；单点登录用户的多因素认证由 IdP 负责。</p></form>`;
+    const roleSel = v => [['sales', '销售'], ['viewer', '只读'], ['manager', '销售经理']].map(([k, l]) => `<option value="${k}" ${v === k ? 'selected' : ''}>${l}</option>`).join('');
+    const w = settings.wecom || {}, d = settings.dingtalk || {};
+    const imCommon = x => `<label class="fld"><span>登录按钮文字</span><input class="field" name="buttonText" maxlength="30" value="${esc(x.buttonText || '')}"></label>
+        <label class="fld"><span>自动开通账号的默认角色</span><select class="field" name="defaultRole">${roleSel(x.defaultRole)}</select></label>
+        <label class="fld"><span>自动开通账号的默认部门</span><select class="field" name="defaultDept">${optionList('dict:departments', x.defaultDept || '', '不指定')}</select></label>`;
+    pane = `<form id="enforceForm" class="settings-form wide-form"><h4>登录策略</h4>
+        <label class="check"><input type="checkbox" name="enforce" ${c.enforce ? 'checked' : ''}> 强制使用第三方登录（启用任一方式后，非管理员不能使用密码登录；管理员保留密码登录用于应急）</label>
+        <div><button class="btn small" type="submit">保存登录策略</button></div></form>
+      <form id="wecomForm" class="settings-form wide-form"><h4 class="sec">企业微信扫码登录</h4>
+        <ol class="howto small"><li>企业微信管理后台 →“应用管理”→ 创建自建应用，记录 AgentId 与 Secret；“我的企业”中查看企业 ID（CorpID）。</li>
+          <li>在应用的“企业微信授权登录”中设置授权回调域，在“网页授权及 JS-SDK”中设置可信域名，均填写本系统域名；并将应用可见范围设为需要登录的成员。</li>
+          <li>回调地址：<code>${esc(w.redirectUri || '')}</code>。在企业微信客户端内打开本系统时将自动静默登录。</li></ol>
+        <label class="check"><input type="checkbox" name="enabled" ${w.enabled ? 'checked' : ''}> 启用企业微信登录</label>
+        <div class="form-grid">
+          <label class="fld"><span>企业 ID（CorpID）</span><input class="field" name="corpId" value="${esc(w.corpId || '')}" placeholder="ww开头"></label>
+          <label class="fld"><span>应用 AgentId</span><input class="field" name="agentId" value="${esc(w.agentId || '')}" inputmode="numeric"></label>
+          <label class="fld wide"><span>应用 Secret</span><input class="field" name="secret" type="password" autocomplete="new-password" placeholder="${w.secretSet ? '已保存，留空则不修改' : ''}"></label>
+          ${imCommon(w)}
+        </div>
+        <label class="check"><input type="checkbox" name="autoCreate" ${w.autoCreate ? 'checked' : ''}> 首次登录自动开通账号（需企业微信返回邮箱；2022 年后新建的应用通常拿不到邮箱/手机号，建议成员自行在个人菜单中绑定）</label>
+        <div class="tools"><button class="btn" type="submit">保存企业微信设置</button>${w.enabled ? '<a class="btn light" href="/api/sso/wecom/start" target="_blank" rel="noopener">测试扫码登录</a>' : ''}</div></form>
+      <form id="dingtalkForm" class="settings-form wide-form"><h4 class="sec">钉钉扫码登录</h4>
+        <ol class="howto small"><li>钉钉开放平台 → 应用开发 → 企业内部应用 → 创建应用，在“凭证与基础信息”获取 Client ID（AppKey）与 Client Secret（AppSecret），在开发者后台首页获取企业 CorpId。</li>
+          <li>“安全设置”→ 重定向 URL 填写：<code>${esc(d.redirectUri || '')}</code>；“权限管理”中开通“个人手机号信息”“通讯录个人信息读权限”（用于按手机号/邮箱匹配成员）。</li>
+          <li>只允许本企业（CorpId 一致）的钉钉账号登录。</li></ol>
+        <label class="check"><input type="checkbox" name="enabled" ${d.enabled ? 'checked' : ''}> 启用钉钉登录</label>
+        <div class="form-grid">
+          <label class="fld"><span>Client ID（AppKey）</span><input class="field" name="clientId" value="${esc(d.clientId || '')}"></label>
+          <label class="fld"><span>企业 CorpId</span><input class="field" name="corpId" value="${esc(d.corpId || '')}" placeholder="ding开头"></label>
+          <label class="fld wide"><span>Client Secret（AppSecret）</span><input class="field" name="clientSecret" type="password" autocomplete="new-password" placeholder="${d.secretSet ? '已保存，留空则不修改' : ''}"></label>
+          ${imCommon(d)}
+        </div>
+        <label class="check"><input type="checkbox" name="autoCreate" ${d.autoCreate ? 'checked' : ''}> 首次登录自动开通账号（需钉钉返回邮箱）</label>
+        <div class="tools"><button class="btn" type="submit">保存钉钉设置</button>${d.enabled ? '<a class="btn light" href="/api/sso/dingtalk/start" target="_blank" rel="noopener">测试扫码登录</a>' : ''}</div></form>
+      <p class="muted small">成员匹配顺序：已绑定 → 邮箱 → 手机号（在团队管理中填写）→ 自动开通。匹配不到时，成员可先用账号密码登录，在右上角个人菜单中“绑定企业微信 / 钉钉”。</p>
+      <div class="sec"></div>${pane}`;
   } else if (tab === 'approval') {
     const ap = ui.apDraft ||= structuredClone(settings.approval.levels);
     const w = settings.webhook || {};
@@ -1228,10 +1269,24 @@ async function pageSettings() {
     e.preventDefault();
     try { settings = (await API.put('/settings', { approval: { levels: ui.apDraft } })).settings; ui.apDraft = null; toast('审批设置已保存'); rerender(); } catch (err) { toast(err.message, true); }
   });
+  $('#enforceForm')?.addEventListener('submit', async e => {
+    e.preventDefault();
+    try { settings = (await API.put('/settings', { sso: { enforce: new FormData(e.currentTarget).has('enforce') } })).settings; toast('登录策略已保存'); rerender(); } catch (err) { toast(err.message, true); }
+  });
+  for (const prov of ['wecom', 'dingtalk']) {
+    $(`#${prov}Form`)?.addEventListener('submit', async e => {
+      e.preventDefault();
+      const fd = new FormData(e.currentTarget), body = { enabled: fd.has('enabled'), autoCreate: fd.has('autoCreate') };
+      for (const k of ['corpId', 'agentId', 'clientId', 'buttonText', 'defaultRole', 'defaultDept']) if (fd.has(k)) body[k] = fd.get(k);
+      for (const k of ['secret', 'clientSecret']) if (fd.get(k)) body[k] = fd.get(k);
+      const btn = e.currentTarget.querySelector('[type=submit]'); btn.disabled = true;
+      try { settings = (await API.put('/settings', { [prov]: body })).settings; toast(`${PROVIDER_NAME[prov]}设置已保存`); rerender(); } catch (err) { toast(err.message, true); btn.disabled = false; }
+    });
+  }
   $('#ssoForm')?.addEventListener('submit', async e => {
     e.preventDefault();
     const fd = new FormData(e.currentTarget);
-    const sso = { enabled: fd.has('enabled'), issuer: fd.get('issuer'), clientId: fd.get('clientId'), buttonText: fd.get('buttonText'), defaultRole: fd.get('defaultRole'), defaultDept: fd.get('defaultDept'), autoCreate: fd.has('autoCreate'), enforce: fd.has('enforce') };
+    const sso = { enabled: fd.has('enabled'), issuer: fd.get('issuer'), clientId: fd.get('clientId'), buttonText: fd.get('buttonText'), defaultRole: fd.get('defaultRole'), defaultDept: fd.get('defaultDept'), autoCreate: fd.has('autoCreate') };
     if (fd.get('clientSecret')) sso.clientSecret = fd.get('clientSecret');
     const btn = e.currentTarget.querySelector('[type=submit]'); btn.disabled = true;
     try { settings = (await API.put('/settings', { sso })).settings; toast('单点登录设置已保存'); rerender(); } catch (err) { toast(err.message, true); btn.disabled = false; }
@@ -1342,6 +1397,12 @@ const ACTIONS = {
     dlg.querySelector('[type=submit]').hidden = false;
     box.querySelector('[name=code]').focus();
   },
+  'im-unbind': async t => {
+    const prov = t.dataset.provider;
+    if (!await confirmBox(`解除与${PROVIDER_NAME[prov]}账号的绑定？解绑后需重新绑定才能扫码登录。`, '解绑')) return;
+    await API.del(`/me/identities?provider=${prov}`);
+    me = (await request('/me')).user; toast('已解绑'); $('#shell')?.remove(); rerender();
+  },
   'user-sso-unbind': async t => {
     const u = R.users.find(x => x.id === t.dataset.id);
     if (!await confirmBox(`解除「${u.name}」与单点登录身份的绑定？下次单点登录时将按邮箱重新绑定。`, '解绑')) return;
@@ -1419,6 +1480,6 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') document.bod
 
 // ======================= 启动 =======================
 (async () => {
-  try { const r = await request('/me'); me = r.user; settings = r.settings; } catch { /* 未登录 */ }
+  try { const r = await request('/me'); me = r.user; settings = r.settings; ui.providers = r.providers || []; } catch { /* 未登录 */ }
   if (me && (!location.hash || location.hash === '#/')) location.hash = '#/dashboard'; else route();
 })();

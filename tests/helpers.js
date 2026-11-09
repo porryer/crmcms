@@ -76,4 +76,71 @@ async function mockIdp() {
   return idp;
 }
 
-module.exports = { startServer, ROOT, mockIdp };
+const http = require('node:http');
+/** 同时模拟企业微信（qyapi）与钉钉（api.dingtalk.com）接口 */
+async function mockOpenApi() {
+  const st = {
+    wecomTokens: 0, wecomExpireNext: false,
+    wecomCodes: new Map(), // code -> { userid } | { openid }
+    wecomUsers: new Map(), // userid -> detail | null(无权限)
+    dingCodes: new Map(),  // code -> { corpId, user }
+  };
+  const server = http.createServer((req, res) => {
+    const u = new URL(req.url, 'http://x'), q = u.searchParams;
+    const json = (o, status = 200) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(o)); };
+    let body = ''; req.on('data', c => (body += c)); req.on('end', () => {
+      // ---- 企业微信 ----
+      if (u.pathname === '/cgi-bin/gettoken') {
+        if (q.get('corpid') !== 'ww123' || q.get('corpsecret') !== 'wecom-secret') return json({ errcode: 40001, errmsg: 'invalid credential' });
+        st.wecomTokens++; return json({ errcode: 0, access_token: 'tok' + st.wecomTokens, expires_in: 7200 });
+      }
+      if (u.pathname === '/cgi-bin/auth/getuserinfo') {
+        if (st.wecomExpireNext) { st.wecomExpireNext = false; return json({ errcode: 42001, errmsg: 'access_token expired' }); }
+        const c = st.wecomCodes.get(q.get('code'));
+        if (!c) return json({ errcode: 40029, errmsg: 'invalid code' });
+        st.wecomCodes.delete(q.get('code'));
+        return json({ errcode: 0, ...c });
+      }
+      if (u.pathname === '/cgi-bin/user/get') {
+        const d = st.wecomUsers.get(q.get('userid'));
+        return d ? json({ errcode: 0, userid: q.get('userid'), ...d }) : json({ errcode: 60011, errmsg: 'no privilege to access/modify contact/party/agent' });
+      }
+      // ---- 钉钉 ----
+      if (u.pathname === '/v1.0/oauth2/accessToken') {
+        const b = JSON.parse(body || '{}');
+        return b.appKey === 'dingkey' && b.appSecret === 'ding-secret' ? json({ accessToken: 'app-token', expireIn: 7200 }) : json({ code: 'invalidClientIdOrSecret', message: '无效的clientId或clientSecret' }, 400);
+      }
+      if (u.pathname === '/v1.0/oauth2/userAccessToken') {
+        const b = JSON.parse(body || '{}');
+        if (b.clientId !== 'dingkey' || b.clientSecret !== 'ding-secret' || b.grantType !== 'authorization_code') return json({ code: 'invalidClient', message: 'bad client' }, 400);
+        const c = st.dingCodes.get(b.code);
+        if (!c) return json({ code: 'invalidAuthCode', message: '不合法的临时授权码' }, 400);
+        return json({ accessToken: 'u-' + b.code, refreshToken: 'r', expireIn: 7200, corpId: c.corpId });
+      }
+      if (u.pathname === '/v1.0/contact/users/me') {
+        const code = String(req.headers['x-acs-dingtalk-access-token'] || '').slice(2), c = st.dingCodes.get(code);
+        if (!c) return json({ code: 'InvalidAuthentication', message: 'token invalid' }, 401);
+        st.dingCodes.delete(code);
+        return json(c.user);
+      }
+      // ---- 浏览器授权页：直接“扫码确认”并回跳（用于 E2E） ----
+      if (u.pathname === '/wwlogin/sso/login' || u.pathname === '/connect/oauth2/authorize') {
+        const code = 'wb' + Math.random().toString(36).slice(2);
+        st.wecomCodes.set(code, st.nextWecom || { userid: 'nobody' });
+        res.writeHead(302, { Location: `${q.get('redirect_uri')}?code=${code}&state=${encodeURIComponent(q.get('state'))}&appid=${q.get('appid')}` }); return res.end();
+      }
+      if (u.pathname === '/oauth2/auth') {
+        const code = 'db' + Math.random().toString(36).slice(2);
+        st.dingCodes.set(code, st.nextDing || { corpId: 'ding-corp', user: { unionId: 'nobody' } });
+        res.writeHead(302, { Location: `${q.get('redirect_uri')}?authCode=${code}&state=${encodeURIComponent(q.get('state'))}` }); return res.end();
+      }
+      json({}, 404);
+    });
+  });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  st.base = `http://127.0.0.1:${server.address().port}`;
+  st.close = () => server.close();
+  return st;
+}
+
+module.exports = { startServer, ROOT, mockIdp, mockOpenApi };
