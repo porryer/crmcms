@@ -18,7 +18,7 @@ const OIDC = require('./lib/oidc');
 const WECOM = require('./lib/wecom');
 const DINGTALK = require('./lib/dingtalk');
 
-const VERSION = '1.5.0';
+const VERSION = '1.6.0';
 const PORT = Number(process.env.PORT || 3100);
 const ROOT = __dirname;
 const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, 'data');
@@ -214,6 +214,7 @@ function verifyPwd(pwd, hash) {
   const a = Buffer.from(expected, 'hex'), b = crypto.scryptSync(pwd, salt, 64);
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
+const DUMMY_HASH = hashPwd(crypto.randomBytes(16).toString('hex'));
 const getRecord = (u, type, key) => db.prepare('SELECT * FROM records WHERE id=? AND tenant_id=? AND type=? AND deleted=0').get(key, u.tenant_id, type);
 const all = (u, type) => db.prepare('SELECT * FROM records WHERE tenant_id=? AND type=? AND deleted=0 ORDER BY created_at DESC').all(u.tenant_id, type).map(row);
 /** 按关联字段取子记录（走表达式索引，不做数据范围过滤，用于完整性校验） */
@@ -343,6 +344,11 @@ function publicSettings(u) {
 const customFieldsOf = (u, type) => (u ? getSettings(u.tenant_id).customFields?.[type] || [] : []);
 
 // ---------- 会话 & Cookie ----------
+/** 追加 Set-Cookie（不覆盖已设置的其他 Cookie） */
+function appendCookie(res, c) {
+  const prev = res.getHeader('Set-Cookie');
+  res.setHeader('Set-Cookie', prev ? [].concat(prev, c) : c);
+}
 const makeCookie = (token, maxAge) => `crm_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${process.env.COOKIE_SECURE === '1' ? '; Secure' : ''}`;
 const sessionToken = req => (req.headers.cookie || '').split(';').map(s => s.trim()).find(s => s.startsWith('crm_session='))?.slice(12) || '';
 const tokenHash = token => crypto.createHash('sha256').update(token).digest('hex');
@@ -355,7 +361,7 @@ function authenticate(req) {
 function createSession(u, res) {
   const token = crypto.randomBytes(32).toString('hex');
   db.prepare('INSERT INTO sessions VALUES(?,?,?)').run(tokenHash(token), u.id, new Date(Date.now() + SESSION_HOURS * 3600000).toISOString());
-  res.setHeader('Set-Cookie', makeCookie(token, SESSION_HOURS * 3600));
+  appendCookie(res, makeCookie(token, SESSION_HOURS * 3600));
 }
 const purgeSessions = () => { db.prepare('DELETE FROM sessions WHERE expiry<=?').run(now()); db.prepare('DELETE FROM sso_states WHERE created_at<?').run(Date.now() - 600000); };
 
@@ -756,7 +762,7 @@ function dashboard(u, range) {
       .sort((a, b) => String(a.dueDate || '9999').localeCompare(String(b.dueDate || '9999')))
       .slice(0, 6).map(x => ({ ...x, accountName: accountName(x.accountId), overdue: !!x.dueDate && x.dueDate < today, dueToday: x.dueDate === today })),
     alerts: openTasks.filter(x => x.dueDate && x.dueDate <= today).length,
-    recent: db.prepare('SELECT action,entity,at FROM audits WHERE tenant_id=? ORDER BY at DESC LIMIT 8').all(u.tenant_id),
+    recent: (() => { const o = scopeOwners(u); return db.prepare(`SELECT action,entity,at FROM audits WHERE tenant_id=? ${o ? `AND user_id IN (${[...o].map(() => '?').join(',')})` : ''} ORDER BY at DESC LIMIT 8`).all(u.tenant_id, ...(o ? [...o] : [])); })(),
   };
 }
 
@@ -1089,6 +1095,18 @@ function enabledProviders(st) {
 }
 const validIssuer = url => { try { const x = new URL(url); return x.protocol === 'https:' || (x.protocol === 'http:' && process.env.SSO_ALLOW_HTTP === '1'); } catch { return false; } };
 function redirect(res, location, headers = {}) { res.writeHead(302, { Location: location, 'Cache-Control': 'no-store', ...headers }); res.end(); }
+/**
+ * 第三方登录 state 与浏览器绑定：发起时写入短期 HttpOnly Cookie，回调时必须一致。
+ * 防止“登录/绑定 CSRF”——攻击者把带自己 state 的授权链接发给他人，使对方身份登录或绑定到攻击者账号。
+ */
+const STATE_COOKIE = 'crm_sso_state';
+const stateCookie = (state, maxAge = 600) => `${STATE_COOKIE}=${state}; HttpOnly; SameSite=Lax; Path=/api/sso; Max-Age=${maxAge}${process.env.COOKIE_SECURE === '1' ? '; Secure' : ''}`;
+const cookieValue = (req, name) => (req.headers.cookie || '').split(';').map(x => x.trim()).find(x => x.startsWith(name + '='))?.slice(name.length + 1) || '';
+function stateMatchesBrowser(req, res, state) {
+  const ok = !!state && cookieValue(req, STATE_COOKIE) === state;
+  appendCookie(res, stateCookie('', 0));
+  return ok;
+}
 const ssoFail = (res, msg) => redirect(res, '/#/login?sso_error=' + encodeURIComponent(msg));
 
 async function ssoStart(req, res, url) {
@@ -1097,7 +1115,7 @@ async function ssoStart(req, res, url) {
   db.prepare('DELETE FROM sso_states WHERE created_at<?').run(Date.now() - 10 * 60 * 1000);
   const state = crypto.randomBytes(24).toString('base64url'), nonce = crypto.randomBytes(24).toString('base64url'), { verifier, challenge } = OIDC.pkce();
   db.prepare("INSERT INTO sso_states(state,tenant_id,nonce,verifier,created_at,provider,next_path) VALUES(?,?,?,?,?,'oidc',?)").run(state, tenantId, nonce, verifier, Date.now(), safeNext(url.searchParams.get('next')));
-  try { return redirect(res, await OIDC.authorizeUrl(cfg, { state, nonce, challenge, redirectUri: ssoRedirectUri(req) })); }
+  try { return redirect(res, await OIDC.authorizeUrl(cfg, { state, nonce, challenge, redirectUri: ssoRedirectUri(req) }), { 'Set-Cookie': stateCookie(state) }); }
   catch (e) { logJson({ type: 'sso_error', stage: 'start', message: e.message }); return ssoFail(res, '无法连接身份提供方：' + e.message); }
 }
 async function ssoCallback(req, res, url) {
@@ -1106,6 +1124,7 @@ async function ssoCallback(req, res, url) {
   const st = db.prepare('SELECT * FROM sso_states WHERE state=?').get(String(q.get('state') || ''));
   if (st) db.prepare('DELETE FROM sso_states WHERE state=?').run(st.state); // 一次性
   if (!st || st.provider !== 'oidc' || Date.now() - st.created_at > 10 * 60 * 1000) return ssoFail(res, '登录请求已失效，请重试');
+  if (!stateMatchesBrowser(req, res, st.state)) return ssoFail(res, '登录请求与当前浏览器不匹配，请在同一浏览器中重新发起登录');
   const cfg = getSettings(st.tenant_id).sso;
   if (!cfg.enabled) return ssoFail(res, '未启用单点登录');
   let claims;
@@ -1145,7 +1164,7 @@ async function imStart(req, res, url, provider) {
   if (!cfg.enabled) return ssoFail(res, `未启用${PROVIDER_NAME[provider]}登录`);
   const state = crypto.randomBytes(24).toString('base64url');
   db.prepare('INSERT INTO sso_states(state,tenant_id,nonce,verifier,created_at,provider,bind_user_id,next_path) VALUES(?,?,?,?,?,?,?,?)').run(state, tenantId, '', '', Date.now(), provider, bindUser?.id || '', safeNext(url.searchParams.get('next')));
-  return redirect(res, IM[provider].authorizeUrl(cfg, { state, redirectUri: ssoRedirectUri(req, provider), inApp: provider === 'wecom' && WECOM.isInApp(req.headers['user-agent']) }));
+  return redirect(res, IM[provider].authorizeUrl(cfg, { state, redirectUri: ssoRedirectUri(req, provider), inApp: provider === 'wecom' && WECOM.isInApp(req.headers['user-agent']) }), { 'Set-Cookie': stateCookie(state) });
 }
 /** 登录后返回的页面：仅允许站内 hash 路由，防开放重定向 */
 const safeNext = v => (typeof v === 'string' && v.length <= 300 && /^#\/[\w\-/?=&%.~+]*$/.test(v) ? v : '');
@@ -1155,6 +1174,7 @@ async function imCallback(req, res, url, provider) {
   const st = db.prepare('SELECT * FROM sso_states WHERE state=?').get(String(q.get('state') || ''));
   if (st) db.prepare('DELETE FROM sso_states WHERE state=?').run(st.state);
   if (!st || st.provider !== provider || Date.now() - st.created_at > 10 * 60 * 1000) return ssoFail(res, '登录请求已失效，请重试');
+  if (!stateMatchesBrowser(req, res, st.state)) return ssoFail(res, '登录请求与当前浏览器不匹配，请在同一浏览器中重新发起登录');
   const code = String(q.get('authCode') || q.get('code') || '');
   if (!code) return ssoFail(res, `${name}未返回授权码（用户可能取消了授权）`);
   const cfg = getSettings(st.tenant_id)[provider];
@@ -1558,7 +1578,10 @@ async function api(req, res, url) {
     const ip = clientIp(req);
     const keys = [[`acct:${email}`, LOGIN_MAX_PER_ACCOUNT], [`ip:${ip}`, LOGIN_MAX_PER_IP]];
     if (loginBlocked(keys)) boom(429, '登录失败次数过多，请 15 分钟后再试');
-    const found = db.prepare('SELECT * FROM users WHERE email=? AND active=1').all(email).find(x => verifyPwd(String(b.password || ''), x.password_hash));
+    const candidates = db.prepare('SELECT * FROM users WHERE email=? AND active=1').all(email);
+    // 账号不存在时也计算一次散列，避免通过响应时间判断账号是否存在
+    if (!candidates.length) verifyPwd(String(b.password || ''), DUMMY_HASH);
+    const found = candidates.find(x => verifyPwd(String(b.password || ''), x.password_hash));
     if (!found) { recordLoginFailure(keys); boom(401, '邮箱或密码错误'); }
     const tst = getSettings(found.tenant_id), provs = enabledProviders(tst);
     if (tst.sso.enforce && provs.length && found.role !== 'admin') boom(403, `本企业已启用单点登录，请使用${provs.map(x => `“${x.text}”`).join('或')}登录`);
@@ -1818,9 +1841,10 @@ async function api(req, res, url) {
   }
   if (p === '/api/audits' && m === 'GET') {
     if (!canManage(u)) boom(403, '无审计查看权限');
-    const entity = url.searchParams.get('entity');
-    const items = db.prepare(`SELECT a.*,u.display_name user_name FROM audits a LEFT JOIN users u ON u.id=a.user_id WHERE a.tenant_id=? ${entity ? 'AND a.entity=?' : ''} ORDER BY a.at DESC LIMIT 300`)
-      .all(...(entity ? [u.tenant_id, entity] : [u.tenant_id]));
+    const entity = url.searchParams.get('entity'), owners = scopeOwners(u);
+    // 数据范围受限的经理只能看到范围内成员的操作记录
+    const items = db.prepare(`SELECT a.*,u.display_name user_name FROM audits a LEFT JOIN users u ON u.id=a.user_id WHERE a.tenant_id=? ${entity ? 'AND a.entity=?' : ''} ${owners ? `AND a.user_id IN (${[...owners].map(() => '?').join(',')})` : ''} ORDER BY a.at DESC LIMIT 300`)
+      .all(u.tenant_id, ...(entity ? [entity] : []), ...(owners ? [...owners] : []));
     return send(res, 200, { items });
   }
   if (p === '/api/backups') {

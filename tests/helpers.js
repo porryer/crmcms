@@ -3,6 +3,8 @@
 const { spawn } = require('node:child_process');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const ROOT = path.join(__dirname, '..');
+/** 从响应中取出会话 Cookie（响应可能同时清除 SSO state Cookie） */
+const sessionCookie = r => (r.headers.getSetCookie?.() || []).map(c => c.split(';')[0]).find(c => c.startsWith('crm_session=') && c.length > 'crm_session='.length);
 
 async function startServer({ dir = fs.mkdtempSync(path.join(os.tmpdir(), 'novacrm-t-')), env = {} } = {}) {
   // PORT=0 由系统分配空闲端口，从启动日志读取实际端口，避免并行测试端口冲突
@@ -21,7 +23,7 @@ async function startServer({ dir = fs.mkdtempSync(path.join(os.tmpdir(), 'novacr
     const r = await fetch(base + '/api' + p, { method, headers: { ...(body !== undefined && !raw ? { 'Content-Type': 'application/json' } : {}), ...(cookie ? { Cookie: cookie } : {}), ...headers }, body: raw ?? (body !== undefined ? JSON.stringify(body) : undefined) });
     const text = await r.text();
     let data; try { data = JSON.parse(text); } catch { data = text; }
-    return { status: r.status, data, headers: r.headers, cookie: r.headers.get('set-cookie')?.split(';')[0] };
+    return { status: r.status, data, headers: r.headers, cookie: sessionCookie(r) };
   };
   client.login = async (email, password, extra = {}) => {
     const r = await client.req('/login', { method: 'POST', body: { email, password, ...extra }, cookie: '' });
@@ -180,4 +182,4 @@ async function mockOpenApi() {
   return st;
 }
 
-module.exports = { startServer, ROOT, mockIdp, mockOpenApi };
+module.exports = { startServer, ROOT, mockIdp, mockOpenApi, sessionCookie };

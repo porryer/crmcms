@@ -2,6 +2,7 @@
 // 企业微信 / 钉钉 扫码登录（模拟开放平台接口）
 const test = require('node:test'), assert = require('node:assert/strict');
 const { startServer, mockOpenApi } = require('./helpers');
+const { sessionCookie } = require('./helpers');
 
 test('WeCom and DingTalk QR login', async t => {
   const api = await mockOpenApi();
@@ -11,9 +12,9 @@ test('WeCom and DingTalk QR login', async t => {
     const r = await fetch(`${s.base}/api/sso/${provider}/start${cookie ? '?bind=1' : ''}`, { redirect: 'manual', headers: { ...(ua ? { 'User-Agent': ua } : {}), ...(cookie ? { Cookie: cookie } : {}) } });
     return new URL(r.headers.get('location').replace('#wechat_redirect', ''), 'https://x');
   };
-  const callback = async (provider, state, code, codeParam = 'code') => {
-    const r = await fetch(`${s.base}/api/sso/${provider}/callback?${codeParam}=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`, { redirect: 'manual' });
-    return { location: decodeURIComponent(r.headers.get('location') || ''), cookie: r.headers.get('set-cookie')?.split(';')[0] };
+  const callback = async (provider, state, code, codeParam = 'code', cookieState) => {
+    const r = await fetch(`${s.base}/api/sso/${provider}/callback?${codeParam}=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`, { redirect: 'manual', headers: { Cookie: 'crm_sso_state=' + (cookieState ?? state) } });
+    return { location: decodeURIComponent(r.headers.get('location') || ''), cookie: sessionCookie(r) };
   };
   const mkUser = (email, name, extra = {}) => s.req('/users', { method: 'POST', body: { email, name, password: 'Password!12345', role: 'sales', ...extra } }).then(r => r.data.id);
 
@@ -88,6 +89,12 @@ test('WeCom and DingTalk QR login', async t => {
     api.wecomCodes.set('b2', { userid: 'LiSi' });
     const r = await callback('wecom', st, 'b2');
     assert.equal((await s.req('/me', { cookie: r.cookie })).data.user.id, uid);
+    // 绑定 CSRF：攻击者用自己账号发起绑定，把授权链接发给受害者；受害者浏览器没有对应 state Cookie → 拒绝
+    const attacker = await s.login('zhang@corp.cn', 'Password!12345');
+    const atkState = (await startFlow('wecom', { cookie: attacker })).searchParams.get('state');
+    api.wecomCodes.set('victim-code', { userid: 'VictimUser' });
+    assert.match((await callback('wecom', atkState, 'victim-code', 'code', 'victim-own-state')).location, /当前浏览器不匹配/);
+    assert.match((await callback('wecom', 'whatever', 'victim-code', 'code', '')).location, /已失效|不匹配/);
     // 已被他人绑定的企业微信账号不能再绑定
     const c2 = await s.login('zhang@corp.cn', 'Password!12345');
     st = (await startFlow('wecom', { cookie: c2 })).searchParams.get('state');
@@ -128,7 +135,7 @@ test('WeCom and DingTalk QR login', async t => {
     assert.equal(me.email, 'new@corp.cn'); assert.equal(me.role, 'viewer'); assert.equal(me.name, '新同事');
     // 用户在授权页取消
     st = (await startFlow('dingtalk')).searchParams.get('state');
-    assert.match(decodeURIComponent((await fetch(`${s.base}/api/sso/dingtalk/callback?state=${st}`, { redirect: 'manual' })).headers.get('location')), /未返回授权码/);
+    assert.match(decodeURIComponent((await fetch(`${s.base}/api/sso/dingtalk/callback?state=${st}`, { redirect: 'manual', headers: { Cookie: 'crm_sso_state=' + st } })).headers.get('location')), /未返回授权码/);
   });
 
   await t.test('enforce mode applies when only WeCom/DingTalk are enabled; admin unbind', async () => {
@@ -169,7 +176,7 @@ test('DingTalk in-app silent login (JSAPI auth code)', async t => {
   assert.equal((await s.req('/me', { cookie: r2.cookie })).data.user.id, uid);
   api.dingCodes.set('qr1', { corpId: 'ding-corp', user: { unionId: 'union-qian', nick: '钱七' } });
   const auth = new URL((await fetch(`${s.base}/api/sso/dingtalk/start`, { redirect: 'manual' })).headers.get('location'));
-  const cb = await fetch(`${s.base}/api/sso/dingtalk/callback?authCode=qr1&state=${auth.searchParams.get('state')}`, { redirect: 'manual' });
+  const cb = await fetch(`${s.base}/api/sso/dingtalk/callback?authCode=qr1&state=${auth.searchParams.get('state')}`, { redirect: 'manual', headers: { Cookie: 'crm_sso_state=' + auth.searchParams.get('state') } });
   assert.equal(cb.headers.get('location'), '/#/dashboard', '扫码登录命中同一绑定');
   // 无效授权码、未匹配成员
   const bad = await inapp('nope');
@@ -200,7 +207,7 @@ test('personal work notifications via WeCom app message and DingTalk work notice
     const c = await s.login(email, 'Password!12345');
     const start = new URL((await fetch(`${s.base}/api/sso/${provider}/start?bind=1`, { redirect: 'manual', headers: { Cookie: c } })).headers.get('location'));
     const code = 'bind-' + email; register(code);
-    await fetch(`${s.base}/api/sso/${provider}/callback?${provider === 'dingtalk' ? 'authCode' : 'code'}=${code}&state=${start.searchParams.get('state')}`, { redirect: 'manual' });
+    await fetch(`${s.base}/api/sso/${provider}/callback?${provider === 'dingtalk' ? 'authCode' : 'code'}=${code}&state=${start.searchParams.get('state')}`, { redirect: 'manual', headers: { Cookie: 'crm_sso_state=' + start.searchParams.get('state') } });
     return c;
   };
   api.wecomUsers.set('WuJL', { name: '经理老吴' });
@@ -262,8 +269,24 @@ test('login returns to the requested page (safe next only)', async t => {
   const run = async next => {
     const start = new URL((await fetch(`${s.base}/api/sso/wecom/start?next=${encodeURIComponent(next)}`, { redirect: 'manual' })).headers.get('location'));
     const code = 'n' + Math.random(); api.wecomCodes.set(code, { userid: 'N1' });
-    return (await fetch(`${s.base}/api/sso/wecom/callback?code=${code}&state=${start.searchParams.get('state')}`, { redirect: 'manual' })).headers.get('location');
+    return (await fetch(`${s.base}/api/sso/wecom/callback?code=${code}&state=${start.searchParams.get('state')}`, { redirect: 'manual', headers: { Cookie: 'crm_sso_state=' + start.searchParams.get('state') } })).headers.get('location');
   };
   assert.equal(await run('#/contracts?q=HT2026001'), '/#/contracts?q=HT2026001');
   for (const evil of ['https://evil.example', '//evil.example', '#/x"><script>', 'javascript:alert(1)']) assert.equal(await run(evil), '/#/dashboard', evil);
+});
+
+test('audit log and dashboard activity respect manager data scope', async t => {
+  const s = await startServer(); t.after(() => s.stop());
+  const mk = (email, role, department, dataScope) => s.req('/users', { method: 'POST', body: { email, name: email, password: 'Password!12345', role, department, dataScope } });
+  await mk('a1@x.cn', 'sales', '一部'); await mk('b1@x.cn', 'sales', '二部'); await mk('m1@x.cn', 'manager', '一部', 'dept');
+  const a = await s.login('a1@x.cn', 'Password!12345'), b = await s.login('b1@x.cn', 'Password!12345');
+  await s.req('/accounts', { method: 'POST', body: { name: '一部客户' }, cookie: a });
+  const secret = (await s.req('/accounts', { method: 'POST', body: { name: '二部机密客户' }, cookie: b })).data.item;
+  const m = await s.login('m1@x.cn', 'Password!12345');
+  const items = (await s.req('/audits', { cookie: m })).data.items;
+  assert.ok(items.length > 0);
+  assert.ok(!items.some(x => x.entity_id === secret.id), '看不到二部成员的操作');
+  assert.ok((await s.req('/audits')).data.items.some(x => x.entity_id === secret.id), '管理员可见全部');
+  const recent = (await s.req('/dashboard', { cookie: m })).data.recent;
+  assert.ok(recent.every(x => x.entity !== 'users'), '不含管理员创建成员的记录');
 });

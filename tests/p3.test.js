@@ -4,6 +4,7 @@ const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { startServer, ROOT, mockIdp } = require('./helpers');
+const { sessionCookie } = require('./helpers');
 
 test('backups include attachments and logo; restore brings them back', async t => {
   const s = await startServer();
@@ -186,7 +187,7 @@ test('OIDC single sign-on', async t => {
   const s = await startServer({ env: { SSO_ALLOW_HTTP: '1', PUBLIC_ORIGIN: 'http://crm.local' } });
   t.after(async () => { await s.stop(); idp.close(); });
   /** 走一遍 start → (模拟 IdP 授权) → callback，返回 { location, cookie } */
-  const flow = async ({ claims = {}, key, mutate } = {}) => {
+  const flow = async ({ claims = {}, key, mutate, noCookie } = {}) => {
     const start = await fetch(s.base + '/api/sso/start', { redirect: 'manual' });
     const auth = new URL(start.headers.get('location'));
     assert.equal(auth.origin, idp.base); assert.equal(auth.searchParams.get('code_challenge_method'), 'S256');
@@ -194,8 +195,8 @@ test('OIDC single sign-on', async t => {
     idp.codes.set(code, { challenge: auth.searchParams.get('code_challenge'), nonce: auth.searchParams.get('nonce'), redirectUri: auth.searchParams.get('redirect_uri'), claims, key });
     let state = auth.searchParams.get('state');
     if (mutate) state = mutate(state);
-    const cb = await fetch(`${s.base}/api/sso/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`, { redirect: 'manual' });
-    return { status: cb.status, location: decodeURIComponent(cb.headers.get('location') || ''), cookie: cb.headers.get('set-cookie')?.split(';')[0], state };
+    const cb = await fetch(`${s.base}/api/sso/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`, { redirect: 'manual', headers: { Cookie: 'crm_sso_state=' + (noCookie ? '' : auth.searchParams.get('state')) } });
+    return { status: cb.status, location: decodeURIComponent(cb.headers.get('location') || ''), cookie: sessionCookie(cb), state };
   };
   assert.equal((await (await fetch(s.base + '/api/sso/config')).json()).enabled, false);
   assert.equal((await s.req('/settings', { method: 'PUT', body: { sso: { enabled: true, issuer: 'ftp://x', clientId: 'a' } } })).status, 400);
@@ -212,7 +213,9 @@ test('OIDC single sign-on', async t => {
   assert.equal(ok.location, '/#/dashboard'); assert.ok(ok.cookie);
   assert.equal((await s.req('/me', { cookie: ok.cookie })).data.user.id, uid);
   // state 只能使用一次 / 伪造 state
-  assert.match((await fetch(`${s.base}/api/sso/callback?code=x&state=${ok.state}`, { redirect: 'manual' })).headers.get('location'), /sso_error/);
+  assert.match((await fetch(`${s.base}/api/sso/callback?code=x&state=${ok.state}`, { redirect: 'manual', headers: { Cookie: 'crm_sso_state=' + ok.state } })).headers.get('location'), /sso_error/);
+  // state 必须与发起登录的浏览器绑定（防登录 CSRF）
+  assert.match((await flow({ noCookie: true })).location, /当前浏览器不匹配/);
   assert.match((await flow({ mutate: () => 'forged' })).location, /已失效/);
   // 各类令牌异常
   assert.match((await flow({ claims: { nonce: 'other' } })).location, /nonce/);

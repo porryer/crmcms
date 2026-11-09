@@ -361,7 +361,7 @@ function renderShell(r) {
   const shell = $('#shell');
   const html = `
     <aside class="aside" id="aside">
-      <a class="brand" href="#/dashboard">${settings.logo ? `<img class="logo img" src="/api/settings/logo?v=${encodeURIComponent(settings.logoV || '')}" alt="">` : '<span class="logo">N</span>'}<span class="navtext">${esc(settings.systemName)}</span><small class="navtext">V1.5</small></a>
+      <a class="brand" href="#/dashboard">${settings.logo ? `<img class="logo img" src="/api/settings/logo?v=${encodeURIComponent(settings.logoV || '')}" alt="">` : '<span class="logo">N</span>'}<span class="navtext">${esc(settings.systemName)}</span><small class="navtext">V1.6</small></a>
       <nav>${items}</nav>
       <div class="side-bottom navtext">${esc(settings.companyName)}<br><span>企业版 · 数据本地存储</span></div>
     </aside>
