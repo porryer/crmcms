@@ -20,7 +20,7 @@ module.exports = [
   },
   {
     files: ['public/**/*.js'],
-    languageOptions: { sourceType: 'script', globals: { ...globals.browser } },
+    languageOptions: { sourceType: 'module', globals: { ...globals.browser } },
   },
   {
     // page.evaluate 回调在浏览器中执行
