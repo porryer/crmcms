@@ -52,11 +52,18 @@ docker compose logs crm # 查看首次启动信息
 
 ```bash
 npm run check   # 语法检查
+npm run lint    # ESLint（需先临时安装，见下）
 npm test        # API 集成测试（自动启动隔离数据库与服务）
 npm run e2e     # 浏览器端到端测试（需 Playwright + Chromium）
 ```
 
-GitHub Actions（`.github/workflows/ci.yml`）在每次推送时运行以上三项并构建 Docker 镜像。
+ESLint 不作为项目依赖，运行前临时安装（不写入 package.json）：
+
+```bash
+npm install --no-save --no-package-lock eslint@9.39.4 @eslint/js@9.39.4 globals@16.5.0
+```
+
+GitHub Actions（`.github/workflows/ci.yml`）在每次推送时运行以上各项并构建 Docker 镜像。
 
 演示数据（仅演示环境，服务启动后执行）：
 

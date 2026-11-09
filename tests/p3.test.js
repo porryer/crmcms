@@ -109,7 +109,7 @@ test('email notifications via SMTP: approvals, assignment, opt-out, digest', asy
   assert.match(smtp.mails[0].subject, /测试邮件/); assert.deepEqual(smtp.mails[0].to, ['admin@local.crm']);
   // 成员
   const mk = (email, name, role) => s.req('/users', { method: 'POST', body: { email, name, password: 'Password!12345', role, dataScope: 'all' } }).then(r => r.data.id);
-  const salesId = await mk('sales1@x.cn', '小销', 'sales'), mgr1 = await mk('mgr1@x.cn', '经理一', 'manager'), mgr2 = await mk('mgr2@x.cn', '经理二', 'manager');
+  const salesId = await mk('sales1@x.cn', '小销', 'sales'), _mgr1 = await mk('mgr1@x.cn', '经理一', 'manager'), mgr2 = await mk('mgr2@x.cn', '经理二', 'manager');
   const sc = await s.login('sales1@x.cn', 'Password!12345');
   // 经理二关闭邮件通知
   const m2c = await s.login('mgr2@x.cn', 'Password!12345');
