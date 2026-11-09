@@ -474,3 +474,13 @@ table.mini.edit .field.slim { min-width: 90px; width: 100%; }
   .content { padding: 0; }
   .statement { display: block; }
 }
+
+.rselect { display: flex; gap: 6px; width: 100%; }
+.rselect .rs-q { flex: 0 0 40%; min-width: 0; }
+.rselect select { flex: 1; min-width: 0; }
+.filter .rselect { width: auto; }
+.filter .rselect .rs-q { flex-basis: 120px; width: 120px; padding: 6px 10px; min-height: 34px; }
+.filter .rselect select { min-width: 160px; padding: 6px 10px; min-height: 34px; }
+.lane-more { display: block; text-align: center; font-size: 12px; color: var(--brand); padding: 8px; }
+.secret { font: 600 18px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 1px; background: #f5f7fb; border: 1px dashed #c9d4e6; border-radius: 8px; padding: 8px 12px; margin: 6px 0; user-select: all; }
+code.wrap { display: block; white-space: pre-wrap; word-break: break-all; margin: 6px 0 12px; }

@@ -108,7 +108,7 @@ const LISTS = {
     filters: [['type', '客户类型', 'dict:accountTypes'], ['industry', '行业', 'dict:industries'], ['level', '客户级别', 'dict:accountLevels'], ['ownerId', '负责人', 'user']], batch: true },
   contacts: { title: '联系人', sub: '客户联系人档案', create: '新增联系人',
     cols: [['name', '姓名', 'strong'], ['accountId', '所属客户', 'account'], ['title', '职位'], ['phone', '电话'], ['email', '邮箱'], ['isPrimary', '主联系人', 'bool']],
-    filters: [['accountId', '客户', 'account']], batch: true },
+    filters: [], batch: true },
   opportunities: { title: '商机管理', sub: '商机阶段、预计金额与成交预测', create: '新增商机',
     cols: [['name', '商机名称', 'oppLink'], ['accountId', '客户', 'account'], ['amount', '预计金额', 'money'], ['stage', '阶段', 'tag'], ['probability', '赢率', 'pct'], ['owner', '负责人'], ['expectedDate', '预计成交', 'date']],
     filters: [['stage', '阶段', STAGES], ['ownerId', '负责人', 'user']], batch: true },
@@ -131,7 +131,7 @@ const LISTS = {
 
 // ======================= 状态 =======================
 let me = null, settings = null;
-const R = { accounts: new Map(), contracts: new Map(), opportunities: new Map(), users: [] };
+const R = { users: [] };
 const ui = { collapsed: false, openGroups: new Set(), dashRange: 'year', oppView: 'board', list: null, tabs: {} };
 const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => [...root.querySelectorAll(s)];
@@ -159,8 +159,6 @@ const canManage = () => me && ['admin', 'manager'].includes(me.role);
 const isAdmin = () => me && me.role === 'admin';
 const dict = k => settings?.dicts?.[k] || [];
 const isOverdue = t => t.status !== '已完成' && t.dueDate && t.dueDate < ymd();
-const accountName = id => R.accounts.get(id)?.name || '';
-const contractLabel = id => { const c = R.contracts.get(id); return c ? `${c.number || ''} ${c.name}`.trim() : ''; };
 /** 内置字段 + 自定义字段 */
 function formFields(type) {
   const custom = (settings.customFields?.[type] || []).map(f => [f.key, f.label, f.type === 'select' ? f.options : f.type, f.required ? 1 : 0, f.type === 'textarea' ? 1 : 0]);
@@ -179,7 +177,7 @@ const debounce = (fn, ms = 250) => { let t; return (...a) => { clearTimeout(t); 
 async function request(url, opt = {}) {
   const r = await fetch('/api' + url, { credentials: 'same-origin', ...opt, headers: { ...(opt.body ? { 'Content-Type': 'application/json' } : {}), ...opt.headers } });
   if (r.status === 401 && me && url !== '/login') { me = null; toast('登录已过期，请重新登录', true); renderLogin(); throw new Error('登录已过期'); }
-  if (!r.ok) { const err = await r.json().catch(() => ({ error: '网络错误' })); throw new Error(err.error || r.statusText); }
+  if (!r.ok) { const data = await r.json().catch(() => ({ error: '网络错误' })); const err = new Error(data.error || r.statusText); err.data = data; err.status = r.status; throw err; }
   return r.json();
 }
 const API = {
@@ -201,11 +199,8 @@ function toast(msg, error = false) {
 }
 
 async function loadRefs() {
-  const [a, c, o, u] = await Promise.all([API.get('/accounts'), API.get('/contracts'), API.get('/opportunities'), API.get('/users')]);
-  R.accounts = new Map(a.items.map(x => [x.id, x]));
-  R.contracts = new Map(c.items.map(x => [x.id, x]));
-  R.opportunities = new Map(o.items.map(x => [x.id, x]));
-  R.users = u.items;
+  // 仅加载成员列表；客户/合同/商机名称由服务端随列表返回，下拉框远程搜索，避免数据量大时全量加载
+  R.users = (await API.get('/users')).items;
 }
 
 // ======================= 路由 =======================
@@ -278,11 +273,21 @@ function renderLogin() {
     const f = Object.fromEntries(new FormData(e.currentTarget));
     const btn = e.currentTarget.querySelector('button'); btn.disabled = true;
     try {
-      const r = await API.post('/login', { email: f.email, password: f.password });
+      const r = await API.post('/login', { email: f.email, password: f.password, ...(f.otp ? { otp: f.otp } : {}) });
       try { if (f.remember) localStorage.setItem('novacrm.email', f.email); else localStorage.removeItem('novacrm.email'); } catch { /* ignore */ }
       me = r.user; settings = r.settings;
       if (!location.hash || location.hash === '#/') location.hash = '#/dashboard'; else route();
-    } catch (err) { toast(err.message, true); btn.disabled = false; }
+    } catch (err) {
+      btn.disabled = false;
+      if (err.data?.mfaRequired) {
+        const form = $('#loginForm');
+        if (!form.querySelector('[name=otp]')) {
+          form.querySelector('.login-row').insertAdjacentHTML('beforebegin', `<label class="input-icon">${icon('shield')}<input name="otp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="身份验证器中的 6 位动态码" required></label>`);
+          if (!f.otp) { toast('该账号已启用两步验证，请输入动态码'); form.querySelector('[name=otp]').focus(); return; }
+        }
+      }
+      toast(err.message, true);
+    }
   });
 }
 
@@ -316,6 +321,7 @@ function renderShell(r) {
           <div class="dropdown" id="userDropdown" hidden>
             <div class="dd-head"><b>${esc(me.name)}</b><small>${esc(me.email)} · ${ROLE_LABEL[me.role]}</small></div>
             <button data-act="password">${icon('key')}修改密码</button>
+            <button data-act="mfa">${icon('shield')}两步验证${me.mfaEnabled ? '（已启用）' : ''}</button>
             <button data-act="logout">${icon('logout')}退出登录</button>
           </div>
         </div>
@@ -397,8 +403,7 @@ function optionList(kind, current = '', withEmpty = '') {
   if (Array.isArray(kind)) opts = kind.map(v => [v, v]);
   else if (kind.startsWith('dict:')) opts = dict(kind.slice(5)).map(v => [v, v]);
   else if (kind === 'user') opts = R.users.filter(u => u.active).map(u => [u.id, u.name]);
-  else if (kind === 'account') opts = [...R.accounts.values()].map(a => [a.id, a.name]);
-  if (current && !opts.some(([v]) => v === current)) opts.unshift([current, kind === 'account' ? accountName(current) || current : kind === 'user' ? (R.users.find(u => u.id === current)?.name || '（已停用成员）') : current]);
+  if (current && !opts.some(([v]) => v === current)) opts.unshift([current, kind === 'user' ? (R.users.find(u => u.id === current)?.name || '（已停用成员）') : current]);
   return (withEmpty !== false ? `<option value="">${withEmpty || '全部'}</option>` : '') + opts.map(([v, l]) => `<option value="${esc(v)}" ${v === current ? 'selected' : ''}>${esc(l)}</option>`).join('');
 }
 
@@ -409,9 +414,9 @@ function cell(type, [key, , kind], x) {
     case 'strong': return `<b>${esc(v || '—')}</b>`;
     case 'accountLink': return `<a class="link" href="#/accounts/${esc(x.id)}">${esc(v)}</a>`;
     case 'oppLink': return `<a class="link" href="#/opportunities/${esc(x.id)}">${esc(v)}</a>`;
-    case 'account': return v ? `<a class="link" href="#/accounts/${esc(v)}">${esc(accountName(v) || '（已删除）')}</a>` : '—';
-    case 'contract': return v ? `<span class="link" data-act="view-contract" data-id="${esc(v)}">${esc(contractLabel(v) || '（已删除）')}</span>` : '—';
-    case 'contractAccount': { const c = R.contracts.get(x.contractId); return c ? `<a class="link" href="#/accounts/${esc(c.accountId)}">${esc(accountName(c.accountId))}</a>` : '—'; }
+    case 'account': return v ? `<a class="link" href="#/accounts/${esc(v)}">${esc(x.accountName || '（已删除）')}</a>` : '—';
+    case 'contract': return v ? `<span class="link" data-act="view-contract" data-id="${esc(v)}">${esc(x.contractLabel || '（已删除）')}</span>` : '—';
+    case 'contractAccount': return x.contractAccountId ? `<a class="link" href="#/accounts/${esc(x.contractAccountId)}">${esc(x.contractAccountName)}</a>` : '—';
     case 'money': return money(v);
     case 'pct': return `${Number(v || 0)}%`;
     case 'tag': return tag(v);
@@ -521,6 +526,42 @@ async function pageList(type, r) {
   await mountList($('#listHost'), type, { q: r.params.get('q') || '' });
 }
 
+// ======================= 远程搜索下拉 =======================
+const RS_TYPE = { account: 'accounts', contract: 'contracts', opportunity: 'opportunities' };
+const RS_EMPTY = { account: '请选择客户', contract: '请选择合同', opportunity: '不关联商机' };
+/** 带搜索框的下拉：输入关键字后从 /api/lookup 拉取前 30 条，避免一次性加载全部客户 */
+function remoteSelect(kind, attrs, value = '', emptyText = RS_EMPTY[kind]) {
+  return `<span class="rselect" data-kind="${kind}"><input class="field rs-q" data-rs-q placeholder="输入名称搜索…" autocomplete="off" aria-label="搜索">
+    <select class="field" ${attrs} data-role="${kind}" data-rs-value="${esc(value)}" data-empty="${esc(emptyText)}"><option value="">${esc(emptyText)}</option>${value ? `<option value="${esc(value)}" selected>加载中…</option>` : ''}</select></span>`;
+}
+async function rsLoad(box, q = '') {
+  const kind = box.dataset.kind, sel = box.querySelector('select'), current = sel.value || sel.dataset.rsValue || '';
+  const params = new URLSearchParams({ type: RS_TYPE[kind], q, limit: 30 });
+  if (kind === 'contract') params.set('active', '1');
+  if (kind === 'opportunity') {
+    const acc = box.closest('form, .toolbar, .modal-body')?.querySelector('[data-role=account]')?.value;
+    if (!acc) { sel.innerHTML = `<option value="">先选择客户</option>`; return; }
+    params.set('accountId', acc);
+  }
+  const reqs = [API.get('/lookup?' + params)];
+  if (current) reqs.push(API.get(`/lookup?type=${RS_TYPE[kind]}&ids=${encodeURIComponent(current)}`));
+  const [list, cur] = await Promise.all(reqs);
+  const items = list.items.slice();
+  if (cur?.items[0] && !items.some(x => x.id === current)) items.unshift(cur.items[0]);
+  sel.innerHTML = `<option value="">${esc(sel.dataset.empty)}</option>` + items.map(x => `<option value="${esc(x.id)}" ${x.id === current ? 'selected' : ''}>${esc(x.label)}</option>`).join('')
+    + (list.items.length >= 30 ? '<option value="" disabled>… 结果较多，请输入关键字缩小范围</option>' : '');
+  sel.dataset.rsValue = sel.value;
+}
+function initRemoteSelects(root) {
+  for (const box of root.querySelectorAll('.rselect')) rsLoad(box).catch(e => toast(e.message, true));
+}
+document.addEventListener('input', debounce(e => { const box = e.target.closest?.('.rselect'); if (box && e.target.matches('[data-rs-q]')) rsLoad(box, e.target.value.trim()).catch(err => toast(err.message, true)); }, 250));
+document.addEventListener('change', e => {
+  if (!e.target.matches?.('[data-role=account]')) return;
+  const opp = e.target.closest('form')?.querySelector('.rselect[data-kind=opportunity]');
+  if (opp) { opp.querySelector('select').dataset.rsValue = ''; rsLoad(opp).catch(err => toast(err.message, true)); }
+});
+
 // ======================= 表单弹窗 =======================
 function fieldControl(type, field, record) {
   const [key, label, kind = 'text', required = 0, wide = 0] = field;
@@ -529,9 +570,7 @@ function fieldControl(type, field, record) {
   let input;
   if (kind === 'textarea') input = `<textarea class="field" name="${key}" ${req} maxlength="3000">${esc(v)}</textarea>`;
   else if (kind === 'checkbox') return `<label class="check fld"><input type="checkbox" name="${key}" ${v ? 'checked' : ''}> ${label}</label>`;
-  else if (kind === 'account') input = `<select class="field" name="${key}" ${req} data-role="account">${optionList('account', v, '请选择客户')}</select>`;
-  else if (kind === 'contract') input = `<select class="field" name="${key}" ${req}><option value="">请选择合同</option>${[...R.contracts.values()].filter(c => c.status !== '已作废' || c.id === v).map(c => `<option value="${esc(c.id)}" ${c.id === v ? 'selected' : ''}>${esc(`${c.number || ''} ${c.name} · ${accountName(c.accountId)}`)}</option>`).join('')}</select>`;
-  else if (kind === 'opportunity') input = `<select class="field" name="${key}" data-role="opportunity"><option value="">不关联</option>${[...R.opportunities.values()].map(o => `<option value="${esc(o.id)}" data-account="${esc(o.accountId)}" ${o.id === v ? 'selected' : ''}>${esc(o.name)} · ${money(o.amount)}</option>`).join('')}</select>`;
+  else if (['account', 'contract', 'opportunity'].includes(kind)) input = remoteSelect(kind, `name="${key}" ${req}`, v);
   else if (kind === 'user') input = `<select class="field" name="${key}">${optionList('user', v, '未分配')}</select>`;
   else if (kind === 'contractStatus') {
     const signed = ['已签订', '执行中', '已完成'];
@@ -566,13 +605,8 @@ function openModal({ title, body, submitText = '保存', onSubmit, wide = false,
     try { const keep = await onSubmit(new FormData(form), form); if (keep !== false) dlg.close(); }
     catch (err) { toast(err.message, true); } finally { btn.disabled = false; }
   });
-  // 商机下拉随客户过滤
-  const acc = form.querySelector('[data-role=account]'), opp = form.querySelector('[data-role=opportunity]');
-  if (acc && opp) {
-    const sync = () => { for (const o of opp.options) if (o.value) o.hidden = !!acc.value && o.dataset.account !== acc.value; if (opp.selectedOptions[0]?.hidden) opp.value = ''; };
-    acc.addEventListener('change', sync); sync();
-  }
   dlg.showModal();
+  initRemoteSelects(form);
   return dlg;
 }
 
@@ -619,7 +653,7 @@ async function viewRecord(type, id) {
   const { item } = await API.get(`/${type}/${id}`);
   const rows = formFields(type).map(([k, label, kind]) => {
     let v = item[k];
-    if (kind === 'user') v = item.owner; else if (kind === 'account') v = accountName(v); else if (kind === 'contract') v = contractLabel(v); else if (kind === 'opportunity') v = R.opportunities.get(v)?.name;
+    if (kind === 'user') v = item.owner; else if (kind === 'account') v = item.accountName; else if (kind === 'contract') v = item.contractLabel; else if (kind === 'opportunity') v = item.opportunityName;
     else if (kind === 'money') v = money(v); else if (kind === 'checkbox') v = v ? '是' : '否'; else if (kind === 'datetime') v = fmtDateTime(v);
     return `<div class="kv ${kind === 'textarea' ? 'wide' : ''}"><span>${label.replace(/（.*?）/, '')}</span><b>${esc(v || '—')}</b></div>`;
   }).join('');
@@ -852,14 +886,16 @@ async function pageOpportunities(r) {
     return mountList($('#listHost'), 'opportunities', { q: r.params.get('q') || '' });
   }
   const owner = r.params.get('owner') || '';
-  const items = [...R.opportunities.values()].filter(o => !owner || o.ownerId === owner);
+  const items = (await API.get('/opportunities' + (owner ? '?ownerId=' + encodeURIComponent(owner) : ''))).items;
+  ui.oppCache = new Map(items.map(o => [o.id, o]));
+  const LANE_MAX = 50;
   const totalOpen = items.filter(o => !['赢单', '输单'].includes(o.stage));
   $('#content').innerHTML = pageHead('商机管理', `进行中 ${totalOpen.length} 个 · 预计金额 ${money(totalOpen.reduce((a, o) => a + Number(o.amount || 0), 0))} · 拖拽卡片可变更阶段`,
     `${switcher}<select class="field slim" data-act-change="opp-owner">${optionList('user', owner, '全部负责人')}</select>${canEdit() ? `<button class="btn" data-act="create" data-type="opportunities">${icon('plus')}新建商机</button>` : ''}`) +
     `<div class="kanban">${STAGES.map((s, i) => {
       const lane = items.filter(o => o.stage === s);
       return `<div class="lane" data-stage="${s}"><div class="lane-head s${i}"><b>${s}</b><span>${lane.length}</span><small>${money(lane.reduce((a, o) => a + Number(o.amount || 0), 0))}</small></div>
-        <div class="lane-body">${lane.map(o => `<a class="deal" href="#/opportunities/${esc(o.id)}" draggable="${canEdit()}" data-id="${esc(o.id)}"><b>${esc(o.name)}</b><span class="muted">${esc(accountName(o.accountId))}</span><strong>${money(o.amount)}</strong><span class="deal-foot">${avatar(o.owner)}<span>${esc(o.owner || '未分配')}</span><small>${o.expectedDate ? fmtDate(o.expectedDate) : ''}</small></span></a>`).join('') || '<div class="lane-empty">拖拽商机到此</div>'}</div></div>`;
+        <div class="lane-body">${[...lane].sort((a, b) => (b.amount || 0) - (a.amount || 0)).slice(0, LANE_MAX).map(o => `<a class="deal" href="#/opportunities/${esc(o.id)}" draggable="${canEdit()}" data-id="${esc(o.id)}"><b>${esc(o.name)}</b><span class="muted">${esc(o.accountName)}</span><strong>${money(o.amount)}</strong><span class="deal-foot">${avatar(o.owner)}<span>${esc(o.owner || '未分配')}</span><small>${o.expectedDate ? fmtDate(o.expectedDate) : ''}</small></span></a>`).join('') || '<div class="lane-empty">拖拽商机到此</div>'}${lane.length > LANE_MAX ? `<a class="lane-more" href="#/opportunities?view=list">还有 ${lane.length - LANE_MAX} 个（按金额显示前 ${LANE_MAX}），在列表中查看</a>` : ''}</div></div>`;
     }).join('')}</div>`;
   bindKanban();
 }
@@ -873,7 +909,7 @@ function bindKanban() {
     l.addEventListener('drop', async e => {
       e.preventDefault(); l.classList.remove('over');
       const id = dragId; dragId = null;
-      if (!id || R.opportunities.get(id)?.stage === l.dataset.stage) return;
+      if (!id || ui.oppCache?.get(id)?.stage === l.dataset.stage) return;
       try { await API.patch(`/opportunities/${id}`, { stage: l.dataset.stage }); toast(`已移至「${l.dataset.stage}」`); rerender(); } catch (err) { toast(err.message, true); }
     });
   });
@@ -892,7 +928,7 @@ async function pageOpportunity(id) {
     <a class="back" href="#/opportunities">${icon('left')}返回商机列表</a>
     <section class="panel detail-hero">
       <span class="hero-ic purple">${icon('briefcase')}</span>
-      <div class="hero-main"><h2>${esc(accountName(o.accountId))} - ${esc(o.name)} ${tag(o.stage)}</h2>
+      <div class="hero-main"><h2>${esc(o.accountName)} - ${esc(o.name)} ${tag(o.stage)}</h2>
         <div class="facts"><span>预计金额：<b>${money(o.amount)}</b></span><span>成交概率：<b>${Number(o.probability || 0)}%</b></span><span>负责人：<b>${esc(o.owner || '未分配')}</b></span><span>预计成交：<b>${fmtDate(o.expectedDate)}</b></span></div></div>
       <div class="tools">${canEdit() ? `<button class="btn light" data-act="edit" data-type="opportunities" data-id="${esc(id)}">${icon('edit')}编辑</button>
         ${next ? `<button class="btn light" data-act="opp-advance" data-id="${esc(id)}" data-stage="${next}">推进到「${next}」</button>` : ''}
@@ -905,7 +941,7 @@ async function pageOpportunity(id) {
     </section>
     <section class="panel">
       <div class="tabs">${[['info', '基本信息'], ['activities', `跟进记录 ${ov?.activities.length || 0}`], ['contracts', `相关合同 ${contracts.length}`], ['files', '相关文件']].map(([k, l]) => `<button class="tab ${k === tab ? 'on' : ''}" data-act="opp-tab" data-tab="${k}">${l}</button>`).join('')}</div>
-      <div class="tab-pane">${tab === 'info' ? `<div class="kv-grid">${[['商机名称', o.name], ['客户', accountName(o.accountId)], ['阶段', o.stage], ['预计金额', money(o.amount)], ['成交概率', `${Number(o.probability || 0)}%`], ['负责人', o.owner], ['预计成交日', fmtDate(o.expectedDate)], ['创建时间', fmtDateTime(o.createdAt)]].map(([k, v]) => `<div class="kv"><span>${k}</span><b>${esc(v || '—')}</b></div>`).join('')}${customKv('opportunities', o)}<div class="kv wide"><span>备注</span><b>${esc(o.notes || '—')}</b></div></div>`
+      <div class="tab-pane">${tab === 'info' ? `<div class="kv-grid">${[['商机名称', o.name], ['客户', o.accountName], ['阶段', o.stage], ['预计金额', money(o.amount)], ['成交概率', `${Number(o.probability || 0)}%`], ['负责人', o.owner], ['预计成交日', fmtDate(o.expectedDate)], ['创建时间', fmtDateTime(o.createdAt)]].map(([k, v]) => `<div class="kv"><span>${k}</span><b>${esc(v || '—')}</b></div>`).join('')}${customKv('opportunities', o)}<div class="kv wide"><span>备注</span><b>${esc(o.notes || '—')}</b></div></div>`
         : tab === 'activities' ? `<div class="sub-head">${canEdit() ? `<button class="btn light small" data-act="create" data-type="activities" data-account="${esc(o.accountId)}">${icon('plus')}写跟进</button>` : ''}</div>${table('activities', LISTS.activities.cols.filter(c => c[0] !== 'accountId'), ov?.activities || [])}`
         : tab === 'files' ? await filesPane('opportunities', id)
         : table('contracts', LISTS.contracts.cols.filter(c => c[0] !== 'accountId'), contracts)}</div>
@@ -926,7 +962,7 @@ async function viewContract(id) {
     <ul class="timeline">${(c.approvalHistory || []).slice().reverse().map(h => `<li class="${h.action}"><b>${esc(h.byName)}</b> ${ACTION[h.action] || h.action}${h.level ? `（${esc(h.level)}）` : ''}<small>${fmtDateTime(h.at)}</small>${h.note ? `<p>${esc(h.note)}</p>` : ''}</li>`).join('')}</ul>` : '';
   openModal({
     title: `合同 ${c.number || ''}`, wide: true, readOnly: true,
-    body: `<div class="kv-grid">${[['合同名称', c.name], ['客户', accountName(c.accountId)], ['关联商机', R.opportunities.get(c.opportunityId)?.name], ['合同金额', money(c.amount)], ['状态', c.status], ['签订日期', fmtDate(c.signedAt)], ['合同期限', c.startDate || c.endDate ? `${fmtDate(c.startDate)} ~ ${fmtDate(c.endDate)}` : ''], ['负责人', c.owner]].map(([k, v]) => `<div class="kv"><span>${k}</span><b>${esc(v || '—')}</b></div>`).join('')}
+    body: `<div class="kv-grid">${[['合同名称', c.name], ['客户', c.accountName], ['关联商机', c.opportunityName], ['合同金额', money(c.amount)], ['状态', c.status], ['签订日期', fmtDate(c.signedAt)], ['合同期限', c.startDate || c.endDate ? `${fmtDate(c.startDate)} ~ ${fmtDate(c.endDate)}` : ''], ['负责人', c.owner]].map(([k, v]) => `<div class="kv"><span>${k}</span><b>${esc(v || '—')}</b></div>`).join('')}
       ${customKv('contracts', c)}<div class="kv wide"><span>备注</span><b>${esc(c.notes || '—')}</b></div></div>${approvalHtml}
       <h4 class="sec">回款进度 <span class="muted small">已收 ${money(got)} / 应收 ${money(c.amount)}（${ratio}%）</span></h4><progress max="100" value="${ratio}"></progress>
       ${pays.length ? `<table class="mini"><thead><tr><th>到账日期</th><th>金额</th><th>方式</th><th>备注</th></tr></thead><tbody>${pays.map(p => `<tr><td>${fmtDate(p.paidAt)}</td><td>${money(p.amount)}</td><td>${esc(p.method)}</td><td>${esc(p.notes || '')}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">暂无回款记录</p>'}
@@ -940,7 +976,7 @@ async function approveModal(id) {
   const levels = c.approvalLevels || [], lv = curLevel(c);
   openModal({
     title: `合同审批${lv ? ' · ' + lv.name : ''}`, submitText: '审批通过',
-    body: `<p>合同：<b>${esc(contractLabel(id))}</b>　金额：<b>${money(c?.amount)}</b>　客户：<b>${esc(accountName(c?.accountId))}</b></p>
+    body: `<p>合同：<b>${esc(`${c.number || ''} ${c.name}`)}</b>　金额：<b>${money(c.amount)}</b>　客户：<b>${esc(c.accountName)}</b></p>
       ${levels.length > 1 ? `<p class="muted small">共 ${levels.length} 级审批：${levels.map((l, i) => i === c.approvalStep ? `<b>${esc(l.name)}（当前）</b>` : esc(l.name)).join(' → ')}</p>` : ''}<label class="fld wide"><span>审批意见</span><textarea class="field" name="note" maxlength="500" placeholder="可选"></textarea></label>`,
     footer: '<button type="button" class="btn light danger" data-act="reject-contract">驳回</button>',
     onSubmit: async fd => { const r = await API.post(`/contracts/${id}/approve`, { approved: true, note: fd.get('note') }); toast(r.pending ? `已通过，流转至「${r.pending.name}」` : '审批通过，合同已签订'); rerender(); },
@@ -976,7 +1012,7 @@ async function renderStatement(body) {
   const r = await API.get('/statements?' + q);
   const s0 = r.summary[0];
   body.innerHTML = `<div class="toolbar"><div class="filters">
-      <label class="filter"><span>客户</span><select class="field slim" id="stAccount">${optionList('account', st.accountId, '全部客户（汇总）')}</select></label>
+      <label class="filter"><span>客户</span>${remoteSelect('account', 'id="stAccount"', st.accountId, '全部客户（汇总）')}</label>
       <label class="range"><input class="field slim" type="date" id="stFrom" value="${st.from}"> ~ <input class="field slim" type="date" id="stTo" value="${st.to}"></label>
       <button class="btn light" data-act="stmt-query">查询</button></div>
       <div class="tools">${canEdit() ? `<button class="btn light" data-act="stmt-export">${icon('download')}导出</button>` : ''}<button class="btn light" data-act="print">${icon('print')}打印</button></div></div>
@@ -992,6 +1028,7 @@ async function renderStatement(body) {
         ${r.summary.map(x => `<tr><td><b>${esc(x.accountName)}</b></td><td class="num">${money(x.opening)}</td><td class="num">${money(x.debit)}</td><td class="num">${money(x.credit)}</td><td class="num ${x.closing > 0 ? 'neg' : ''}">${money(x.closing)}</td><td class="ops"><button class="textbtn" data-act="stmt-account" data-id="${esc(x.accountId)}">明细</button></td></tr>`).join('') || '<tr><td colspan="6" class="center muted">期间内无往来</td></tr>'}
         <tr class="sum"><td>合计</td><td class="num">${money(r.totals.opening)}</td><td class="num">${money(r.totals.debit)}</td><td class="num">${money(r.totals.credit)}</td><td class="num">${money(r.totals.closing)}</td><td></td></tr></tbody></table></div>`}
       <p class="muted small">口径：应收 = 已生效合同金额（按签订日期），回款按到账日期；不含草稿与作废合同。</p></div>`;
+  initRemoteSelects(body);
 }
 
 // ======================= 任务 =======================
@@ -1037,8 +1074,8 @@ async function pageReports() {
 async function pageTeam() {
   const items = R.users;
   $('#content').innerHTML = pageHead('团队管理', '成员、部门、角色与权限', isAdmin() ? `<button class="btn" data-act="user-create">${icon('plus')}新增成员</button>` : '') + `
-    <section class="panel flush"><div class="tbl-wrap"><table><thead><tr><th>姓名</th>${canManage() ? '<th>账号</th>' : ''}<th>部门</th><th>角色</th>${canManage() ? '<th>数据范围</th>' : ''}<th>状态</th>${canManage() ? '<th>最近登录</th>' : ''}${isAdmin() ? '<th class="ops">操作</th>' : ''}</tr></thead><tbody>
-      ${items.map(u => `<tr><td><span class="who">${avatar(u.name, 'blue')}<b>${esc(u.name)}</b>${u.id === me.id ? '<span class="tag gray">我</span>' : ''}</span></td>${canManage() ? `<td>${esc(u.email)}</td>` : ''}<td>${esc(u.department || '—')}</td><td><span class="tag ${u.role === 'admin' ? 'red' : u.role === 'manager' ? 'orange' : u.role === 'sales' ? 'blue' : 'gray'}">${ROLE_LABEL[u.role]}</span></td>${canManage() ? `<td>${SCOPE_LABEL[u.dataScope] || '—'}</td>` : ''}<td><span class="dot ${u.active ? 'on' : 'off'}"></span>${u.active ? '正常' : '停用'}</td>${canManage() ? `<td>${u.lastLoginAt ? fmtDateTime(u.lastLoginAt) : '—'}</td>` : ''}${isAdmin() ? `<td class="ops"><div class="row-actions"><button class="textbtn" data-act="user-edit" data-id="${esc(u.id)}">编辑</button>${u.id !== me.id ? `<button class="textbtn ${u.active ? 'danger' : ''}" data-act="user-toggle" data-id="${esc(u.id)}">${u.active ? '停用' : '启用'}</button>` : ''}</div></td>` : ''}</tr>`).join('')}
+    <section class="panel flush"><div class="tbl-wrap"><table><thead><tr><th>姓名</th>${canManage() ? '<th>账号</th>' : ''}<th>部门</th><th>角色</th>${canManage() ? '<th>数据范围</th><th>两步验证</th>' : ''}<th>状态</th>${canManage() ? '<th>最近登录</th>' : ''}${isAdmin() ? '<th class="ops">操作</th>' : ''}</tr></thead><tbody>
+      ${items.map(u => `<tr><td><span class="who">${avatar(u.name, 'blue')}<b>${esc(u.name)}</b>${u.id === me.id ? '<span class="tag gray">我</span>' : ''}</span></td>${canManage() ? `<td>${esc(u.email)}</td>` : ''}<td>${esc(u.department || '—')}</td><td><span class="tag ${u.role === 'admin' ? 'red' : u.role === 'manager' ? 'orange' : u.role === 'sales' ? 'blue' : 'gray'}">${ROLE_LABEL[u.role]}</span></td>${canManage() ? `<td>${SCOPE_LABEL[u.dataScope] || '—'}</td><td>${u.mfaEnabled ? '<span class="tag green">已启用</span>' : '<span class="muted">未启用</span>'}</td>` : ''}<td><span class="dot ${u.active ? 'on' : 'off'}"></span>${u.active ? '正常' : '停用'}</td>${canManage() ? `<td>${u.lastLoginAt ? fmtDateTime(u.lastLoginAt) : '—'}</td>` : ''}${isAdmin() ? `<td class="ops"><div class="row-actions"><button class="textbtn" data-act="user-edit" data-id="${esc(u.id)}">编辑</button>${u.mfaEnabled && u.id !== me.id ? `<button class="textbtn" data-act="user-mfa-reset" data-id="${esc(u.id)}">重置验证</button>` : ''}${u.id !== me.id ? `<button class="textbtn ${u.active ? 'danger' : ''}" data-act="user-toggle" data-id="${esc(u.id)}">${u.active ? '停用' : '启用'}</button>` : ''}</div></td>` : ''}</tr>`).join('')}
     </tbody></table></div></section>
     <section class="panel"><h3>角色权限说明</h3><div class="tbl-wrap plain"><table><thead><tr><th>角色</th><th>查看</th><th>新增/编辑</th><th>删除</th><th>合同审批</th><th>导出</th><th>审计日志</th><th>成员与系统设置</th></tr></thead><tbody>
       ${[['管理员', 1, 1, 1, 1, 1, 1, 1], ['销售经理', 1, 1, 1, 1, 1, 1, 0], ['销售', 1, 1, 0, 0, 1, 0, 0], ['只读', 1, 0, 0, 0, 0, 0, 0]].map(([n, ...f]) => `<tr><td><b>${n}</b></td>${f.map(v => `<td>${v ? '<span class="ok">✓</span>' : '<span class="muted">—</span>'}</td>`).join('')}</tr>`).join('')}
@@ -1061,6 +1098,25 @@ function userModal(u = null) {
       toast('已保存'); rerender();
     },
   });
+}
+
+// ======================= 两步验证 =======================
+function mfaModal() {
+  const enabled = me.mfaEnabled;
+  const dlg = openModal({
+    title: '两步验证（TOTP）', submitText: enabled ? '关闭两步验证' : '完成绑定',
+    body: enabled
+      ? `<p><span class="tag green">已启用</span> 登录时需输入身份验证器中的动态码。</p><p class="muted small">如需关闭，请输入登录密码和当前动态码。</p>
+         <label class="fld wide"><span>登录密码</span><input class="field" type="password" name="password" required autocomplete="current-password"></label>
+         <label class="fld wide"><span>动态码</span><input class="field" name="code" inputmode="numeric" maxlength="6" required autocomplete="one-time-code"></label>`
+      : `<p>启用后，登录除密码外还需输入手机身份验证器生成的 6 位动态码，可有效防止密码泄露导致的账号被盗。</p><button type="button" class="btn" data-act="mfa-start">${icon('shield')}开始设置</button>`,
+    onSubmit: async fd => {
+      if (enabled) { await API.post('/mfa/disable', { password: fd.get('password'), code: fd.get('code') }); me.mfaEnabled = false; toast('已关闭两步验证'); }
+      else { await API.post('/mfa/enable', { code: fd.get('code') }); me.mfaEnabled = true; toast('两步验证已启用'); }
+      $('#shell')?.remove(); rerender();
+    },
+  });
+  if (!enabled) dlg.querySelector('[type=submit]').hidden = true;
 }
 
 // ======================= 系统设置 =======================
@@ -1113,7 +1169,7 @@ async function pageSettings() {
     const bk = isAdmin() ? await API.get('/backups') : null;
     pane = (bk ? `<div class="panel-head"><h4>数据备份</h4><button class="btn small" data-act="backup-now">${icon('download')}立即备份</button></div>
       <p class="muted small">自动备份：${bk.schedule.intervalHours > 0 ? `每 ${bk.schedule.intervalHours} 小时一次` : '已关闭'}，保留最近 ${bk.schedule.keep} 份；快照位于数据目录 backups/。恢复需停服后执行 <code>node scripts/restore.js &lt;快照&gt; --yes</code>。</p>
-      ${bk.items.length ? `<div class="tbl-wrap plain"><table class="mini"><thead><tr><th>快照文件</th><th>大小</th><th>时间</th></tr></thead><tbody>${bk.items.map(b => `<tr><td><code>${esc(b.name)}</code></td><td>${(b.size / 1024).toFixed(0)} KB</td><td>${fmtDateTime(b.createdAt)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">暂无备份</p>'}<h4 class="sec">安全配置</h4>` : '') + `<div class="kv-grid">${[['系统版本', 'V' + h.version], ['数据存储', 'SQLite（WAL）'], ['会话有效期', '8 小时，HttpOnly + SameSite Cookie'], ['密码策略', '≥12 位，scrypt 加盐散列'], ['登录保护', '同账号 15 分钟内失败 5 次锁定'], ['数据权限', '按成员“数据范围”控制（本人/本部门/全部）'], ['金额存储', '整数“分”，避免浮点误差']].map(([k, v]) => `<div class="kv"><span>${k}</span><b>${esc(v)}</b></div>`).join('')}</div>`;
+      ${bk.items.length ? `<div class="tbl-wrap plain"><table class="mini"><thead><tr><th>快照文件</th><th>大小</th><th>时间</th></tr></thead><tbody>${bk.items.map(b => `<tr><td><code>${esc(b.name)}</code></td><td>${(b.size / 1024).toFixed(0)} KB</td><td>${fmtDateTime(b.createdAt)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">暂无备份</p>'}<h4 class="sec">安全配置</h4>` : '') + `<div class="kv-grid">${[['系统版本', 'V' + h.version], ['数据存储', 'SQLite（WAL）'], ['会话有效期', '8 小时，HttpOnly + SameSite Cookie'], ['密码策略', '≥12 位、至少 3 类字符、不含账号名；scrypt 加盐散列'], ['登录保护', '同账号 15 分钟内失败 5 次锁定（持久化）'], ['两步验证', 'TOTP 动态码，用户可自助启用，管理员可重置'], ['访问日志', 'ACCESS_LOG=1 输出 JSON 行日志，含请求 ID'], ['数据权限', '按成员“数据范围”控制（本人/本部门/全部）'], ['金额存储', '整数“分”，避免浮点误差']].map(([k, v]) => `<div class="kv"><span>${k}</span><b>${esc(v)}</b></div>`).join('')}</div>`;
   }
   $('#content').innerHTML = pageHead('系统设置', '基础设置、数据字典、字段与审计日志') + `<section class="panel settings"><div class="tabs">${tabs.map(([k, l]) => `<button class="tab ${k === tab ? 'on' : ''}" data-act="settings-tab" data-tab="${k}">${l}</button>`).join('')}</div><div class="tab-pane">${pane}</div></section>`;
   $('#cfForm')?.addEventListener('submit', async e => {
@@ -1211,6 +1267,23 @@ const ACTIONS = {
   'report-query': () => { ui.tabs.reports = { from: $('#rFrom').value, to: $('#rTo').value }; rerender(); },
   'report-export': () => { location.href = `/api/reports?from=${encodeURIComponent($('#rFrom').value)}&to=${encodeURIComponent($('#rTo').value)}&format=csv`; },
   'user-create': () => userModal(),
+  mfa: () => mfaModal(),
+  'mfa-start': async t => {
+    const r = await API.post('/mfa/setup');
+    const box = t.closest('.modal-body');
+    box.innerHTML = `<ol class="howto"><li>在手机上打开身份验证器 App（Google/Microsoft Authenticator、腾讯身份验证器等），选择“手动输入密钥”。</li>
+      <li>账号填写 <b>${esc(me.email)}</b>，密钥填写：<div class="secret">${esc(r.secret.match(/.{1,4}/g).join(' '))}</div>类型选“基于时间”。</li>
+      <li>输入 App 中显示的 6 位动态码完成绑定。</li></ol>
+      <details><summary class="muted small">otpauth 链接（可用其他工具生成二维码）</summary><code class="wrap">${esc(r.uri)}</code></details>
+      <label class="fld wide"><span>动态码</span><input class="field" name="code" inputmode="numeric" maxlength="6" required autocomplete="one-time-code"></label>`;
+    const dlg = t.closest('dialog'); dlg.dataset.mode = 'enable';
+    dlg.querySelector('[type=submit]').hidden = false;
+  },
+  'user-mfa-reset': async t => {
+    const u = R.users.find(x => x.id === t.dataset.id);
+    if (!await confirmBox(`重置「${u.name}」的两步验证？对方下次登录只需密码，可重新绑定。`, '重置')) return;
+    await API.patch(`/users/${u.id}`, { resetMfa: true }); toast('已重置'); rerender();
+  },
   notif: () => openNotifications(),
   import: t => importModal(t.dataset.type),
   'file-del': async t => {

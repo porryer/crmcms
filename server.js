@@ -10,8 +10,9 @@ const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 const backups = require('./lib/backup');
 const CSV = require('./lib/csv');
+const TOTP = require('./lib/totp');
 
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 const PORT = Number(process.env.PORT || 3100);
 const ROOT = __dirname;
 const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, 'data');
@@ -41,6 +42,10 @@ addColumn('users', 'department', "department TEXT NOT NULL DEFAULT ''");
 addColumn('users', 'last_login_at', 'last_login_at TEXT');
 addColumn('users', 'data_scope', "data_scope TEXT NOT NULL DEFAULT ''");
 addColumn('users', 'notif_seen_at', 'notif_seen_at TEXT');
+addColumn('users', 'totp_secret', "totp_secret TEXT NOT NULL DEFAULT ''");
+addColumn('users', 'totp_enabled', 'totp_enabled INTEGER NOT NULL DEFAULT 0');
+addColumn('users', 'totp_last_step', 'totp_last_step INTEGER NOT NULL DEFAULT 0');
+db.exec('CREATE TABLE IF NOT EXISTS login_failures(key TEXT PRIMARY KEY,first_at INTEGER NOT NULL,count INTEGER NOT NULL)');
 db.exec(`CREATE TABLE IF NOT EXISTS attachments(id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,entity TEXT NOT NULL,entity_id TEXT NOT NULL,name TEXT NOT NULL,mime TEXT NOT NULL,size INTEGER NOT NULL,sha256 TEXT NOT NULL,created_by TEXT NOT NULL,created_at TEXT NOT NULL,deleted INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS idx_attach_entity ON attachments(tenant_id,entity,entity_id,deleted);`);
 db.exec(`
@@ -187,6 +192,49 @@ const all = (u, type) => db.prepare('SELECT * FROM records WHERE tenant_id=? AND
 /** 按关联字段取子记录（走表达式索引，不做数据范围过滤，用于完整性校验） */
 const childrenOf = (u, type, field, value) => db.prepare(`SELECT * FROM records WHERE tenant_id=? AND type=? AND deleted=0 AND json_extract(data,'$.${field}')=?`).all(u.tenant_id, type, value).map(row);
 
+/** 按 ID 批量取记录（含已删除，用于显示名称） */
+function byIds(u, type, ids) {
+  const out = new Map(), list = [...ids].filter(Boolean);
+  for (let i = 0; i < list.length; i += 500) {
+    const chunk = list.slice(i, i + 500);
+    for (const r of db.prepare(`SELECT * FROM records WHERE tenant_id=? AND type=? AND id IN (${chunk.map(() => '?').join(',')})`).all(u.tenant_id, type, ...chunk)) out.set(r.id, row(r));
+  }
+  return out;
+}
+/** 为列表项补充关联名称（客户名、合同编号名称、商机名），前端无需加载全量引用数据 */
+function decorate(u, items) {
+  const acc = new Set(), con = new Set(), opp = new Set();
+  for (const x of items) { if (x.accountId) acc.add(x.accountId); if (x.contractId) con.add(x.contractId); if (x.opportunityId) opp.add(x.opportunityId); if (x.convertedAccountId) acc.add(x.convertedAccountId); }
+  const contracts = byIds(u, 'contracts', con);
+  for (const c of contracts.values()) acc.add(c.accountId);
+  const accounts = byIds(u, 'accounts', acc), opps = byIds(u, 'opportunities', opp);
+  return items.map(x => {
+    const d = { ...x };
+    if (x.accountId) d.accountName = accounts.get(x.accountId)?.name || '';
+    if (x.opportunityId) d.opportunityName = opps.get(x.opportunityId)?.name || '';
+    if (x.contractId) {
+      const c = contracts.get(x.contractId);
+      d.contractLabel = c ? `${c.number || ''} ${c.name}`.trim() : '';
+      d.contractAccountId = c?.accountId || ''; d.contractAccountName = c ? accounts.get(c.accountId)?.name || '' : '';
+    }
+    return d;
+  });
+}
+/** 下拉框远程搜索 */
+function lookup(u, params) {
+  const type = params.get('type');
+  if (!['accounts', 'contracts', 'opportunities'].includes(type)) boom(400, '不支持的类型');
+  const q = String(params.get('q') || '').trim().toLowerCase(), accountId = params.get('accountId'), ids = params.get('ids');
+  const limit = Math.min(100, Number(params.get('limit')) || 30);
+  let items = scoped(u, type);
+  if (ids) { const want = new Set(ids.split(',')); items = items.filter(x => want.has(x.id)); }
+  if (accountId) items = items.filter(x => x.accountId === accountId);
+  if (type === 'contracts' && params.get('active') === '1') items = items.filter(x => x.status !== '已作废');
+  if (q) items = items.filter(x => `${x.name || ''} ${x.number || ''} ${x.phone || ''}`.toLowerCase().includes(q));
+  items = decorate(u, items.slice(0, limit));
+  return { items: items.map(x => ({ id: x.id, label: type === 'contracts' ? `${x.number || ''} ${x.name} · ${x.accountName}`.trim() : type === 'opportunities' ? `${x.name} · ¥${Number(x.amount || 0).toLocaleString('zh-CN')}` : x.name, accountId: x.accountId || '', amount: x.amount })) };
+}
+
 // ---------- 行级数据权限 ----------
 const effectiveScope = u => (DATA_SCOPES.includes(u.data_scope) ? u.data_scope : DEFAULT_SCOPE[u.role] || 'self');
 /** 可见负责人集合；null 表示全部可见 */
@@ -230,7 +278,7 @@ function audit(u, action, entity, entityId, details = {}) {
 }
 function httpError(status, message) { const e = new Error(message); e.status = status; return e; }
 function boom(status, message) { throw httpError(status, message); }
-const publicUser = u => ({ id: u.id, tenantId: u.tenant_id, name: u.display_name, email: u.email, role: u.role, department: u.department || '' });
+const publicUser = u => ({ id: u.id, tenantId: u.tenant_id, name: u.display_name, email: u.email, role: u.role, department: u.department || '', mfaEnabled: !!u.totp_enabled });
 const canWrite = u => ['admin', 'manager', 'sales'].includes(u.role);
 const canManage = u => ['admin', 'manager'].includes(u.role);
 const canDelete = canManage;
@@ -279,21 +327,28 @@ const purgeSessions = () => db.prepare('DELETE FROM sessions WHERE expiry<=?').r
 
 // ---------- 登录防爆破（单进程内存计数） ----------
 const LOGIN_WINDOW_MS = 15 * 60 * 1000, LOGIN_MAX_PER_ACCOUNT = 5, LOGIN_MAX_PER_IP = 30;
-const loginFailures = new Map();
+// 失败计数存于数据库：重启不丢失，多进程共享同一数据库时也一致
 function loginBlocked(keys) {
-  const t = Date.now();
-  return keys.some(([k, max]) => { const v = loginFailures.get(k); return v && t - v.first < LOGIN_WINDOW_MS && v.count >= max; });
+  const t = Date.now(), get = db.prepare('SELECT first_at,count FROM login_failures WHERE key=?');
+  return keys.some(([k, max]) => { const v = get.get(k); return v && t - v.first_at < LOGIN_WINDOW_MS && v.count >= max; });
 }
 function recordLoginFailure(keys) {
   const t = Date.now();
-  for (const [k] of keys) {
-    const v = loginFailures.get(k);
-    if (!v || t - v.first >= LOGIN_WINDOW_MS) loginFailures.set(k, { first: t, count: 1 }); else v.count++;
-  }
+  const upsert = db.prepare(`INSERT INTO login_failures(key,first_at,count) VALUES(?,?,1)
+    ON CONFLICT(key) DO UPDATE SET count=CASE WHEN ?-first_at>=? THEN 1 ELSE count+1 END, first_at=CASE WHEN ?-first_at>=? THEN ? ELSE first_at END`);
+  for (const [k] of keys) upsert.run(k, t, t, LOGIN_WINDOW_MS, t, LOGIN_WINDOW_MS, t);
 }
-function pruneLoginFailures() {
-  const t = Date.now();
-  for (const [k, v] of loginFailures) if (t - v.first >= LOGIN_WINDOW_MS) loginFailures.delete(k);
+const clearLoginFailures = key => db.prepare('DELETE FROM login_failures WHERE key=?').run(key);
+const pruneLoginFailures = () => db.prepare('DELETE FROM login_failures WHERE first_at<?').run(Date.now() - LOGIN_WINDOW_MS);
+
+/** 密码策略：≥12 位，包含大写/小写/数字/符号中至少 3 类，且不包含邮箱前缀 */
+function checkPassword(pw, email = '') {
+  pw = String(pw || '');
+  if (pw.length < 12 || pw.length > 128) boom(400, '密码长度需为 12-128 位');
+  const classes = [/[a-z]/, /[A-Z]/, /\d/, /[^A-Za-z0-9]/].filter(r => r.test(pw)).length;
+  if (classes < 3) boom(400, '密码需包含大写字母、小写字母、数字、符号中的至少 3 类');
+  const local = String(email).split('@')[0].toLowerCase();
+  if (local.length >= 4 && pw.toLowerCase().includes(local)) boom(400, '密码不能包含账号名');
 }
 
 /** 反向代理部署时设置 TRUST_PROXY=1，取 X-Forwarded-For 最左侧地址 */
@@ -776,10 +831,10 @@ function listRecords(u, type, params) {
     items.sort((a, b) => (typeof a[key] === 'number' && typeof b[key] === 'number' ? a[key] - b[key] : String(a[key] ?? '').localeCompare(String(b[key] ?? ''), 'zh-CN')) * dir);
   }
   const total = items.length;
-  if (!params.has('page')) return { items, total };
+  if (!params.has('page')) return { items: params.get('raw') === '1' ? items : decorate(u, items), total };
   const pageSize = Math.min(200, Math.max(1, Number(params.get('pageSize')) || 10));
   const page = Math.max(1, Number(params.get('page')) || 1);
-  return { items: items.slice((page - 1) * pageSize, page * pageSize), total, page, pageSize };
+  return { items: decorate(u, items.slice((page - 1) * pageSize, page * pageSize)), total, page, pageSize };
 }
 
 function exportRows(u, type, items) {
@@ -813,13 +868,13 @@ function search(u, q) {
 function accountOverview(u, accountId) {
   const account = row(getVisible(u, 'accounts', accountId));
   if (!account) boom(404, '客户不存在');
-  const of = type => scoped(u, type).filter(x => x.accountId === accountId);
+  // 客户可见即其下全部子记录可见（数据权限规则），直接走关联索引
+  const of = type => childrenOf(u, type, 'accountId', accountId);
   const contracts = of('contracts');
-  const contractIds = new Set(contracts.map(c => c.id));
-  const payments = scoped(u, 'payments').filter(p => contractIds.has(p.contractId));
+  const payments = contracts.flatMap(c => childrenOf(u, 'payments', 'contractId', c.id));
   const activities = of('activities').sort((a, b) => String(b.occurredAt || b.createdAt).localeCompare(String(a.occurredAt || a.createdAt)));
   return {
-    account, contacts: of('contacts'), activities, opportunities: of('opportunities'), contracts, payments, tasks: of('tasks'),
+    account, contacts: of('contacts'), activities, opportunities: of('opportunities'), contracts, payments: decorate(u, payments), tasks: of('tasks'),
     stats: {
       activities: activities.length,
       opportunities: of('opportunities').filter(o => OPEN_STAGES.includes(o.stage)).length,
@@ -1089,7 +1144,7 @@ function statement(u, accountId, from, to) {
 
 // ---------- 用户管理 ----------
 function listUsers(u) {
-  return db.prepare('SELECT id,email,role,display_name name,department,active,created_at createdAt,last_login_at lastLoginAt,data_scope dataScope FROM users WHERE tenant_id=? ORDER BY created_at').all(u.tenant_id)
+  return db.prepare('SELECT id,email,role,display_name name,department,active,created_at createdAt,last_login_at lastLoginAt,data_scope dataScope,totp_enabled mfaEnabled FROM users WHERE tenant_id=? ORDER BY created_at').all(u.tenant_id)
     .map(x => ({ ...x, dataScopeSet: x.dataScope || '', dataScope: DATA_SCOPES.includes(x.dataScope) ? x.dataScope : DEFAULT_SCOPE[x.role] }))
     .map(x => (canManage(u) ? x : { id: x.id, name: x.name, role: x.role, department: x.department, active: x.active }));
 }
@@ -1097,7 +1152,8 @@ async function createUser(u, req) {
   if (u.role !== 'admin') boom(403, '仅管理员可添加用户');
   const b = await readBody(req);
   const role = String(b.role || 'sales'), email = String(b.email || '').trim().toLowerCase(), password = String(b.password || '');
-  if (!ROLES.includes(role) || !/^\S+@\S+\.\S+$/.test(email) || password.length < 12) boom(400, '用户信息无效：邮箱格式、角色或密码长度不符合要求');
+  if (!ROLES.includes(role) || !/^\S+@\S+\.\S+$/.test(email)) boom(400, '用户信息无效：邮箱格式或角色不正确');
+  checkPassword(password, email);
   const uid = newId();
   try {
     const dataScope = DATA_SCOPES.includes(b.dataScope) ? b.dataScope : '';
@@ -1126,14 +1182,16 @@ async function updateUser(u, req, userId) {
     if (admins <= 1) boom(409, '至少需要保留一名启用的管理员');
   }
   const resetPassword = b.password !== undefined && b.password !== '';
-  if (resetPassword && String(b.password).length < 12) boom(400, '新密码不少于12位');
+  if (resetPassword) checkPassword(b.password, target.email);
+  const resetMfa = b.resetMfa === true;
   transaction(() => {
     db.prepare('UPDATE users SET display_name=?,department=?,role=?,active=?,data_scope=? WHERE id=?').run(next.display_name, next.department, next.role, next.active, next.data_scope, target.id);
     // 负责人姓名为冗余字段，随成员改名同步
     if (next.display_name !== target.display_name) db.prepare("UPDATE records SET data=json_set(data,'$.owner',?) WHERE tenant_id=? AND json_extract(data,'$.ownerId')=?").run(next.display_name, u.tenant_id, target.id);
     if (resetPassword) db.prepare('UPDATE users SET password_hash=? WHERE id=?').run(hashPwd(String(b.password)), target.id);
-    if (resetPassword || !next.active || next.role !== target.role) db.prepare('DELETE FROM sessions WHERE user_id=?').run(target.id);
-    audit(u, 'update', 'users', target.id, { before: { name: target.display_name, role: target.role, department: target.department, active: target.active, dataScope: target.data_scope }, resetPassword });
+    if (resetMfa) db.prepare("UPDATE users SET totp_enabled=0,totp_secret='' WHERE id=?").run(target.id);
+    if (resetPassword || resetMfa || !next.active || next.role !== target.role) db.prepare('DELETE FROM sessions WHERE user_id=?').run(target.id);
+    audit(u, 'update', 'users', target.id, { before: { name: target.display_name, role: target.role, department: target.department, active: target.active, dataScope: target.data_scope }, resetPassword, resetMfa });
   });
   return { ok: true };
 }
@@ -1141,7 +1199,13 @@ async function updateUser(u, req, userId) {
 // ---------- 路由 ----------
 async function api(req, res, url) {
   const p = url.pathname, m = req.method;
-  if (p === '/api/health') return send(res, 200, { status: 'ok', version: VERSION, storage: 'sqlite' });
+  if (p === '/api/health') {
+    // 数据库可读 + 可获取写锁（磁盘只读/满、文件损坏时返回 503，供容器健康检查与监控告警使用）
+    let dbOk = true;
+    try { db.prepare('SELECT 1').get(); db.exec('BEGIN IMMEDIATE'); db.exec('ROLLBACK'); } catch { dbOk = false; }
+    const last = backups.listBackups(DATA_DIR)[0];
+    return send(res, dbOk ? 200 : 503, { status: dbOk ? 'ok' : 'degraded', version: VERSION, storage: 'sqlite', db: dbOk ? 'ok' : 'error', uptimeSec: Math.round(process.uptime()), lastBackupAt: last?.createdAt || null });
+  }
 
   if (p === '/api/login' && m === 'POST') {
     const b = await readBody(req), email = String(b.email || '').trim().toLowerCase();
@@ -1150,7 +1214,14 @@ async function api(req, res, url) {
     if (loginBlocked(keys)) boom(429, '登录失败次数过多，请 15 分钟后再试');
     const found = db.prepare('SELECT * FROM users WHERE email=? AND active=1').all(email).find(x => verifyPwd(String(b.password || ''), x.password_hash));
     if (!found) { recordLoginFailure(keys); boom(401, '邮箱或密码错误'); }
-    loginFailures.delete(`acct:${email}`);
+    if (found.totp_enabled) {
+      // 密码正确但未提供动态码：提示前端进入第二步，不计失败
+      if (!b.otp) return send(res, 401, { error: '请输入身份验证器中的 6 位动态码', mfaRequired: true });
+      const s2 = TOTP.verify(found.totp_secret, b.otp);
+      if (s2 < 0 || s2 <= found.totp_last_step) { recordLoginFailure(keys); return send(res, 401, { error: '动态码错误或已使用', mfaRequired: true }); }
+      db.prepare('UPDATE users SET totp_last_step=? WHERE id=?').run(s2, found.id);
+    }
+    clearLoginFailures(`acct:${email}`);
     createSession(found, res);
     db.prepare('UPDATE users SET last_login_at=? WHERE id=?').run(now(), found.id);
     audit(found, 'login', 'session', found.id);
@@ -1159,6 +1230,7 @@ async function api(req, res, url) {
 
   const u = authenticate(req);
   if (!u) boom(401, '请先登录');
+  req.uid = u.id;
 
   if (p === '/api/me' && m === 'GET') return send(res, 200, { user: publicUser(u), settings: publicSettings(u) });
   if (p === '/api/logout' && m === 'POST') {
@@ -1169,11 +1241,38 @@ async function api(req, res, url) {
   if (p === '/api/password' && m === 'POST') {
     const b = await readBody(req);
     if (!verifyPwd(String(b.oldPassword || ''), u.password_hash)) boom(403, '原密码错误');
-    if (String(b.newPassword || '').length < 12) boom(400, '新密码不少于12位');
+    checkPassword(b.newPassword, u.email);
     db.prepare('UPDATE users SET password_hash=? WHERE id=?').run(hashPwd(String(b.newPassword)), u.id);
     db.prepare('DELETE FROM sessions WHERE user_id=?').run(u.id);
     res.setHeader('Set-Cookie', makeCookie('', 0));
     audit(u, 'change_password', 'users', u.id);
+    return send(res, 200, { ok: true });
+  }
+
+  // ---- 两步验证（TOTP）----
+  if (p === '/api/mfa/setup' && m === 'POST') {
+    if (u.totp_enabled) boom(409, '已启用两步验证');
+    const secret = TOTP.generateSecret();
+    db.prepare('UPDATE users SET totp_secret=? WHERE id=?').run(secret, u.id);
+    return send(res, 200, { secret, uri: TOTP.otpauthUri(secret, u.email, getSettings(u.tenant_id).systemName) });
+  }
+  if (p === '/api/mfa/enable' && m === 'POST') {
+    const b = await readBody(req);
+    if (u.totp_enabled) boom(409, '已启用两步验证');
+    if (!u.totp_secret) boom(400, '请先生成密钥');
+    const st = TOTP.verify(u.totp_secret, b.code);
+    if (st < 0) boom(400, '动态码不正确，请确认手机时间准确');
+    db.prepare('UPDATE users SET totp_enabled=1,totp_last_step=? WHERE id=?').run(st, u.id);
+    audit(u, 'mfa_enable', 'users', u.id);
+    return send(res, 200, { ok: true });
+  }
+  if (p === '/api/mfa/disable' && m === 'POST') {
+    const b = await readBody(req);
+    if (!u.totp_enabled) boom(409, '未启用两步验证');
+    if (!verifyPwd(String(b.password || ''), u.password_hash)) boom(403, '密码错误');
+    if (TOTP.verify(u.totp_secret, b.code) < 0) boom(403, '动态码不正确');
+    db.prepare("UPDATE users SET totp_enabled=0,totp_secret='' WHERE id=?").run(u.id);
+    audit(u, 'mfa_disable', 'users', u.id);
     return send(res, 200, { ok: true });
   }
 
@@ -1277,6 +1376,7 @@ async function api(req, res, url) {
   }
   if (p === '/api/dashboard' && m === 'GET') return send(res, 200, dashboard(u, url.searchParams.get('range') || 'year'));
   if (p === '/api/finance' && m === 'GET') return send(res, 200, finance(u));
+  if (p === '/api/lookup' && m === 'GET') return send(res, 200, lookup(u, url.searchParams));
   if (p === '/api/search' && m === 'GET') return send(res, 200, search(u, url.searchParams.get('q')));
   if (p === '/api/reports' && m === 'GET') {
     const r = reports(u, url.searchParams.get('from'), url.searchParams.get('to'));
@@ -1448,7 +1548,7 @@ async function api(req, res, url) {
     boom(404, '接口不存在');
   }
 
-  if (m === 'GET') return send(res, 200, { item: row(old) });
+  if (m === 'GET') return send(res, 200, { item: decorate(u, [row(old)])[0] });
   if (m === 'PATCH') {
     if (!canWrite(u)) boom(403, '无编辑权限');
     if (type === 'payments') boom(403, '回款不可修改，请删除错误登记后重建');
@@ -1509,7 +1609,20 @@ function originAllowed(req) {
   return allowed.has(origin);
 }
 
+/** 结构化访问日志（ACCESS_LOG=1 开启，每行一条 JSON，便于 Loki/ELK/云日志采集） */
+const ACCESS_LOG = process.env.ACCESS_LOG === '1';
+function logJson(obj) { process.stdout.write(JSON.stringify({ t: now(), ...obj }) + '\n'); }
 const server = http.createServer(async (req, res) => {
+  const started = process.hrtime.bigint();
+  const rid = /^[\w-]{8,64}$/.test(req.headers['x-request-id'] || '') ? req.headers['x-request-id'] : crypto.randomBytes(8).toString('hex');
+  res.setHeader('X-Request-Id', rid);
+  if (ACCESS_LOG) {
+    res.on('finish', () => {
+      const path0 = req.url.split('?')[0];
+      if (path0 === '/api/health') return;
+      logJson({ type: 'access', rid, ip: clientIp(req), method: req.method, path: path0, status: res.statusCode, ms: Number(process.hrtime.bigint() - started) / 1e6, uid: req.uid || null });
+    });
+  }
   try {
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname.startsWith('/api/')) {
@@ -1522,7 +1635,7 @@ const server = http.createServer(async (req, res) => {
   } catch (e) {
     if (!res.headersSent) send(res, e.status || 500, { error: e.status ? e.message : '服务器内部错误' });
     else res.end();
-    if (!e.status) console.error(e);
+    if (!e.status) logJson({ type: 'error', rid, method: req.method, path: req.url.split('?')[0], message: e.message, stack: e.stack });
   }
 });
 
