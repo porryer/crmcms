@@ -425,3 +425,52 @@ dialog:not(.wide) .form-grid { grid-template-columns: 1fr; }
   .clip { max-width: 160px; }
 }
 @media print { .aside, .topbar, .tabbar, .tools, .row-actions { display: none !important; } .panel { box-shadow: none; } }
+
+/* ---------- V1.2：通知 / 附件 / 导入 / 对账 / 审批 / 自定义字段 ---------- */
+.logo.img { object-fit: cover; background: #fff; padding: 0; }
+.notif { position: relative; }
+.notif-panel { width: 360px; padding: 0; overflow: hidden; }
+.notif-panel .dd-head { margin: 0; padding: 12px 14px; }
+.dd-head.row { display: flex; justify-content: space-between; align-items: baseline; }
+.notif-list { max-height: 420px; overflow-y: auto; }
+.notif-item { display: flex; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line-2); }
+.notif-item:hover { background: #f7f9fc; }
+.notif-item.unread { background: #f4f8ff; }
+.notif-item b, .notif-item small, .notif-item em { display: block; }
+.notif-item small { color: var(--text-2); margin-top: 2px; word-break: break-all; }
+.notif-item em { font-style: normal; color: var(--muted); font-size: 12px; margin-top: 4px; }
+.n-ic { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; flex-shrink: 0; background: var(--brand-soft); color: var(--brand); }
+.n-ic .ic { width: 16px; height: 16px; }
+.n-ic.task, .n-ic.plan { background: var(--orange-soft); color: #d97706; }
+.n-ic.approve { background: var(--green-soft); color: var(--green); }
+.n-ic.reject { background: var(--red-soft); color: var(--red); }
+.howto { margin: 0 0 14px; padding-left: 20px; color: var(--text-2); line-height: 1.8; }
+.import-sum { display: flex; gap: 18px; margin: 14px 0 8px; font-size: 15px; }
+.files .sub-head { justify-content: space-between; align-items: center; gap: 10px; }
+.files .link .ic { width: 15px; height: 15px; margin-right: 2px; }
+.steps.small { margin: 6px 0 12px; }
+.steps.small li span { width: 26px; height: 26px; font-size: 12px; }
+.steps.small li::before { top: 12px; }
+.timeline { list-style: none; margin: 0; padding: 0 0 0 14px; border-left: 2px solid var(--line); }
+.timeline li { position: relative; padding: 4px 0 10px 10px; font-size: 13px; }
+.timeline li::before { content: ""; position: absolute; left: -20px; top: 8px; width: 10px; height: 10px; border-radius: 50%; background: var(--brand); border: 2px solid #fff; }
+.timeline li.approve::before { background: var(--green); } .timeline li.reject::before { background: var(--red); } .timeline li.withdraw::before { background: var(--muted); }
+.timeline small { color: var(--muted); margin-left: 8px; }
+.timeline p { margin: 4px 0 0; color: var(--text-2); background: #f7f9fc; padding: 6px 10px; border-radius: 6px; }
+.statement h3 { margin: 6px 0; }
+.statement p.center { margin: 0 0 12px; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr.sum td { background: #f7f9fc; font-weight: 600; }
+.sign { display: flex; justify-content: space-between; margin: 28px 8px 8px; color: var(--text-2); }
+table.mini.edit td, table.mini.edit th { text-align: left !important; }
+table.mini.edit .field.slim { min-width: 90px; width: 100%; }
+.cf-block { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
+.cf-block .panel-head { margin-bottom: 8px; }
+.checks { display: flex; gap: 18px; flex-wrap: wrap; padding: 6px 0; }
+#approvalForm .tools, #cfForm .tools { margin-top: 12px; }
+@media print {
+  .content > *:not(.panel), .kpis, .tabs, .toolbar, .page-head, .modal { display: none !important; }
+  body, .panel { background: #fff; }
+  .content { padding: 0; }
+  .statement { display: block; }
+}

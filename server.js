@@ -9,6 +9,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 const backups = require('./lib/backup');
+const CSV = require('./lib/csv');
 
 const VERSION = '1.1.0';
 const PORT = Number(process.env.PORT || 3100);
@@ -39,6 +40,9 @@ addColumn('tenants', 'settings', "settings TEXT NOT NULL DEFAULT '{}'");
 addColumn('users', 'department', "department TEXT NOT NULL DEFAULT ''");
 addColumn('users', 'last_login_at', 'last_login_at TEXT');
 addColumn('users', 'data_scope', "data_scope TEXT NOT NULL DEFAULT ''");
+addColumn('users', 'notif_seen_at', 'notif_seen_at TEXT');
+db.exec(`CREATE TABLE IF NOT EXISTS attachments(id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,entity TEXT NOT NULL,entity_id TEXT NOT NULL,name TEXT NOT NULL,mime TEXT NOT NULL,size INTEGER NOT NULL,sha256 TEXT NOT NULL,created_by TEXT NOT NULL,created_at TEXT NOT NULL,deleted INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS idx_attach_entity ON attachments(tenant_id,entity,entity_id,deleted);`);
 db.exec(`
 CREATE INDEX IF NOT EXISTS idx_records_account ON records(tenant_id,type,json_extract(data,'$.accountId')) WHERE deleted=0;
 CREATE INDEX IF NOT EXISTS idx_records_contract ON records(tenant_id,type,json_extract(data,'$.contractId')) WHERE deleted=0;
@@ -82,7 +86,17 @@ const DEFAULT_SETTINGS = {
     paymentMethods: ['银行转账', '支付宝', '微信', '现金', '其他'],
     departments: ['销售部', '客户部', '市场部', '财务部', '技术部'],
   },
+  /** 自定义字段：{ 实体: [{ key: 'cf_xxxx', label, type, options, required, inList }] } */
+  customFields: {},
+  /** 合同审批：按金额阈值命中的级别依次审批 */
+  approval: { levels: [{ name: '销售经理审批', role: 'manager', minAmount: 0 }] },
+  /** 群机器人通知：kind = wecom | dingtalk | generic */
+  webhook: { url: '', kind: 'wecom', events: ['approval', 'assign'] },
+  logo: '',
 };
+const CUSTOM_FIELD_TYPES = ['text', 'textarea', 'number', 'date', 'select'];
+const CUSTOM_FIELD_ENTITIES = ['leads', 'accounts', 'contacts', 'opportunities', 'contracts'];
+const WEBHOOK_EVENTS = ['approval', 'assign', 'overdue'];
 
 /**
  * 实体定义：fields 为允许写入的字段；enums 为服务端强校验的枚举；numbers 为数字字段及范围。
@@ -231,8 +245,20 @@ function getSettings(tenantId) {
   const t = db.prepare('SELECT name,settings FROM tenants WHERE id=?').get(tenantId);
   let s = {};
   try { s = JSON.parse(t?.settings || '{}'); } catch { s = {}; }
-  return { ...DEFAULT_SETTINGS, ...s, companyName: s.companyName || t?.name || DEFAULT_SETTINGS.companyName, dicts: { ...DEFAULT_SETTINGS.dicts, ...(s.dicts || {}) } };
+  return {
+    ...DEFAULT_SETTINGS, ...s, companyName: s.companyName || t?.name || DEFAULT_SETTINGS.companyName,
+    dicts: { ...DEFAULT_SETTINGS.dicts, ...(s.dicts || {}) },
+    customFields: s.customFields || {}, approval: s.approval?.levels?.length ? s.approval : DEFAULT_SETTINGS.approval,
+    webhook: { ...DEFAULT_SETTINGS.webhook, ...(s.webhook || {}) },
+  };
 }
+/** 返回给前端的设置：Webhook 地址含密钥，仅管理员可见 */
+function publicSettings(u) {
+  const st = getSettings(u.tenant_id);
+  if (u.role !== 'admin') st.webhook = { configured: !!st.webhook.url };
+  return st;
+}
+const customFieldsOf = (u, type) => (u ? getSettings(u.tenant_id).customFields?.[type] || [] : []);
 
 // ---------- 会话 & Cookie ----------
 const makeCookie = (token, maxAge) => `crm_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${process.env.COOKIE_SECURE === '1' ? '; Secure' : ''}`;
@@ -279,13 +305,13 @@ const send = (res, status, body, headers = {}) => {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...SECURITY_HEADERS, ...headers });
   res.end(JSON.stringify(body));
 };
-function readBody(req) {
+function readBody(req, limit = 1024 * 1024) {
   return new Promise((resolve, reject) => {
     const parts = []; let len = 0, failed = false;
     req.on('data', chunk => {
       if (failed) return;
       len += chunk.length;
-      if (len > 1024 * 1024) { failed = true; reject(httpError(413, '请求体过大')); return; }
+      if (len > limit) { failed = true; reject(httpError(413, '请求体过大')); return; }
       parts.push(chunk);
     });
     req.on('end', () => {
@@ -296,21 +322,14 @@ function readBody(req) {
   });
 }
 /** 防 CSV 公式注入：以 = + - @ 制表/回车开头的单元格前加单引号 */
-function csv(headers, rows) {
-  const esc = v => {
-    let s = String(v === undefined || v === null ? '' : v);
-    if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
-    return '"' + s.replace(/"/g, '""') + '"';
-  };
-  return '﻿' + [headers.map(esc).join(','), ...rows.map(r => r.map(esc).join(','))].join('\r\n');
-}
+const csv = CSV.stringify;
 function sendCSV(res, filename, headers, rows) {
-  res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`, 'Cache-Control': 'no-store' });
+  res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="${filename.replace(/[^\x20-\x7e]/g, '_').replace(/"/g, '')}"; filename*=UTF-8''${encodeURIComponent(filename)}`, 'Cache-Control': 'no-store' });
   res.end(csv(headers, rows));
 }
 
 // ---------- 校验 ----------
-function sanitize(type, obj, existing = {}) {
+function sanitize(type, obj, existing = {}, u = null) {
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) boom(400, '提交内容无效');
   const def = TABLES[type];
   const data = { ...existing, ...(!Object.keys(existing).length ? def.defaults : {}) };
@@ -336,6 +355,22 @@ function sanitize(type, obj, existing = {}) {
     data[field] = v;
   }
   for (const k of def.required) if (!String(data[k] ?? '').trim()) boom(400, `缺少必填字段: ${LABELS[k] || k}`);
+  const custom = customFieldsOf(u, type), creating = !Object.keys(existing).length;
+  for (const f of custom) {
+    if (!Object.hasOwn(obj, f.key)) continue;
+    let v = obj[f.key] ?? '';
+    if (f.type === 'number') {
+      if (v !== '') { v = Number(v); if (!Number.isFinite(v)) boom(400, `${f.label} 必须为数字`); }
+    } else {
+      if (typeof v !== 'string' && typeof v !== 'number') boom(400, `${f.label} 格式错误`);
+      v = String(v);
+      if (v.length > 3000) boom(400, `${f.label} 过长`);
+      if (f.type === 'date' && v && !/^\d{4}-\d{2}-\d{2}$/.test(v)) boom(400, `${f.label} 日期格式应为 YYYY-MM-DD`);
+      if (f.type === 'select' && v && !(f.options || []).includes(v)) boom(400, `${f.label} 取值无效：${v}`);
+    }
+    data[f.key] = v;
+  }
+  for (const f of custom) if (f.required && (creating || Object.hasOwn(obj, f.key)) && String(data[f.key] ?? '').trim() === '') boom(400, `缺少必填字段: ${f.label}`);
   return data;
 }
 
@@ -397,12 +432,64 @@ function validRefs(u, type, data, recordId = null) {
 }
 
 /** 非经理角色不得直接把合同置为审批后状态 */
+/**
+ * 合同状态流转规则（返回 'submit' 表示需要发起审批）：
+ * 草稿 →审批中（提交）→ 按级别审批 → 已签订 → 执行中/已完成；作废需经理以上。
+ * 跳过审批直接置为已签订等仅管理员可做（历史补录）。
+ */
 function guardContractStatus(u, before, after) {
-  if (canManage(u)) return;
-  if (after.status !== before.status && CONTRACT_APPROVED.includes(after.status)) boom(403, '合同需经理或管理员审批后才能变更为该状态');
-  if (CONTRACT_APPROVED.includes(before.status) && before.status !== '已作废' && (after.amount !== before.amount || after.accountId !== before.accountId)) {
-    boom(403, '已审批合同的金额与客户仅经理或管理员可修改');
+  const signed = ['已签订', '执行中', '已完成'];
+  const isAdmin = u.role === 'admin';
+  if (after.status !== before.status) {
+    if (after.status === '审批中') { if (before.status !== '草稿') boom(409, '仅草稿合同可以提交审批'); return 'submit'; }
+    if (signed.includes(after.status) && !signed.includes(before.status) && !isAdmin) boom(403, '合同需通过审批流程签订（管理员可直接补录）');
+    if (CONTRACT_APPROVED.includes(after.status) && !canManage(u)) boom(403, '合同需经理或管理员审批后才能变更为该状态');
+    if (after.status === '草稿' && signed.includes(before.status) && !isAdmin) boom(403, '已签订合同不能退回草稿');
   }
+  const changedMoney = after.amount !== before.amount || after.accountId !== before.accountId;
+  if (before.status === '审批中' && after.status === '审批中' && changedMoney && !isAdmin) boom(409, '审批中的合同不能修改金额或客户，请先撤回');
+  if (CONTRACT_APPROVED.includes(before.status) && before.status !== '已作废' && changedMoney && !canManage(u)) boom(403, '已审批合同的金额与客户仅经理或管理员可修改');
+  return null;
+}
+function approvalLevelsFor(u, amount) {
+  const levels = getSettings(u.tenant_id).approval.levels;
+  const hit = levels.filter(l => cents(amount) >= cents(l.minAmount || 0));
+  return (hit.length ? hit : levels.slice(0, 1)).map(l => ({ name: l.name, role: l.role }));
+}
+function startApproval(u, data) {
+  data.status = '审批中';
+  data.approvalLevels = approvalLevelsFor(u, data.amount);
+  data.approvalStep = 0;
+  data.submittedBy = u.id;
+  data.approvalHistory = [...(data.approvalHistory || []), { action: 'submit', by: u.id, byName: u.display_name, at: now() }].slice(-50);
+}
+const currentLevel = c => (c.approvalLevels || [])[c.approvalStep || 0] || null;
+/** 当前节点可审批：角色匹配且非提交人本人；管理员可审批任意节点 */
+function canApprove(u, c) {
+  if (c.status !== '审批中') return false;
+  if (u.role === 'admin') return true;
+  const lv = currentLevel(c);
+  if (!lv) return u.role === 'manager';
+  return u.role === lv.role && c.submittedBy !== u.id;
+}
+
+// ---------- 群机器人 Webhook ----------
+function notifyWebhook(u, event, title, lines) {
+  const w = getSettings(u.tenant_id).webhook;
+  if (!w.url || !(w.events || []).includes(event)) return;
+  const text = `### ${title}\n` + lines.map(l => `> ${l}`).join('\n');
+  const body = w.kind === 'dingtalk' ? { msgtype: 'markdown', markdown: { title, text } }
+    : w.kind === 'wecom' ? { msgtype: 'markdown', markdown: { content: text } }
+      : { event, title, lines, at: now() };
+  fetch(w.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(5000) })
+    .catch(e => console.error('[webhook]', event, e.message));
+}
+function validWebhookUrl(url) {
+  if (!url) return true;
+  try {
+    const x = new URL(url);
+    return x.protocol === 'https:' || (x.protocol === 'http:' && process.env.WEBHOOK_ALLOW_HTTP === '1');
+  } catch { return false; }
 }
 
 function nextContractNumber(u) {
@@ -701,9 +788,11 @@ function exportRows(u, type, items) {
   for (const [field, refType] of [['accountId', 'accounts'], ['contractId', 'contracts'], ['opportunityId', 'opportunities'], ['convertedAccountId', 'accounts']]) {
     if (def.fields.includes(field)) { refs[field] = new Map(all(u, refType).map(r => [r.id, r.number ? `${r.number} ${r.name}` : r.name])); }
   }
-  const cols = ['id', ...def.fields, 'createdAt', 'updatedAt'];
+  const custom = customFieldsOf(u, type);
+  const cols = ['id', ...def.fields.filter(f => f !== 'ownerId'), ...custom.map(f => f.key), 'createdAt', 'updatedAt'];
+  const label = c => LABELS[c] || custom.find(f => f.key === c)?.label || c;
   return {
-    headers: cols.map(c => LABELS[c] || c),
+    headers: cols.map(label),
     rows: items.map(x => cols.map(c => (refs[c] ? refs[c].get(x[c]) ?? x[c] : typeof x[c] === 'boolean' ? (x[c] ? '是' : '否') : x[c]))),
   };
 }
@@ -739,6 +828,263 @@ function accountOverview(u, accountId) {
       lastActivityAt: activities[0]?.occurredAt || activities[0]?.createdAt || null,
     },
   };
+}
+
+function notifyApprovalPending(u, c) {
+  const lv = currentLevel(c);
+  notifyWebhook(u, 'approval', `合同待审批：${lv?.name || '审批'}`, [`${c.number} ${c.name}`, `金额：¥${c.amount}`, `提交人：${u.display_name}`]);
+}
+function validateCustomFields(input, current = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) boom(400, '自定义字段格式错误');
+  const out = { ...current };
+  for (const [entity, list] of Object.entries(input)) {
+    if (!CUSTOM_FIELD_ENTITIES.includes(entity)) boom(400, `不支持为 ${entity} 添加自定义字段`);
+    if (!Array.isArray(list) || list.length > 30) boom(400, '每个对象最多 30 个自定义字段');
+    const keys = new Set();
+    out[entity] = list.map(f => {
+      const label = String(f?.label || '').trim().slice(0, 30);
+      if (!label) boom(400, '自定义字段名称不能为空');
+      const type = CUSTOM_FIELD_TYPES.includes(f.type) ? f.type : 'text';
+      const key = /^cf_[a-z0-9]{4,16}$/.test(f.key || '') ? f.key : 'cf_' + crypto.randomBytes(4).toString('hex');
+      if (keys.has(key)) boom(400, '自定义字段键重复');
+      keys.add(key);
+      const options = type === 'select' ? [...new Set((Array.isArray(f.options) ? f.options : String(f.options || '').split(/[\n,，]/)).map(x => String(x).trim()).filter(Boolean))].slice(0, 50) : [];
+      if (type === 'select' && !options.length) boom(400, `下拉字段“${label}”至少需要一个选项`);
+      return { key, label, type, options, required: !!f.required, inList: !!f.inList };
+    });
+  }
+  return out;
+}
+function validateApproval(input) {
+  const levels = Array.isArray(input?.levels) ? input.levels : [];
+  if (!levels.length || levels.length > 5) boom(400, '审批级别需 1-5 级');
+  return {
+    levels: levels.map(l => {
+      const name = String(l?.name || '').trim().slice(0, 30);
+      if (!name) boom(400, '审批级别名称不能为空');
+      if (!['manager', 'admin'].includes(l.role)) boom(400, '审批人角色只能是销售经理或管理员');
+      const minAmount = Number(l.minAmount || 0);
+      if (!Number.isFinite(minAmount) || minAmount < 0) boom(400, '金额阈值无效');
+      return { name, role: l.role, minAmount };
+    }),
+  };
+}
+
+// ---------- 站内通知 ----------
+function notifications(u) {
+  const items = [], today = ymd(new Date()), soon = ymd(new Date(Date.now() + 3 * 86400000));
+  for (const t of scoped(u, 'tasks')) {
+    if (t.ownerId === u.id && t.status !== '已完成' && t.dueDate && t.dueDate <= today) {
+      items.push({ type: 'task', id: t.id, title: t.dueDate < today ? '任务已逾期' : '任务今日到期', text: t.title, link: '#/tasks?view=due', at: t.dueDate + 'T00:00:00' });
+    }
+  }
+  const contracts = scoped(u, 'contracts'), byId = new Map(contracts.map(c => [c.id, c]));
+  for (const c of contracts) {
+    if (!canApprove(u, c)) continue;
+    const last = (c.approvalHistory || []).at(-1);
+    items.push({ type: 'approval', id: c.id, title: `待审批：${currentLevel(c)?.name || '合同审批'}`, text: `${c.number} ${c.name} · ¥${Number(c.amount).toLocaleString('zh-CN')}`, link: '#/contracts?q=' + encodeURIComponent(c.number || c.name), at: last?.at || c.updatedAt });
+  }
+  for (const p of scoped(u, 'plans')) {
+    const c = byId.get(p.contractId);
+    if (p.status === '已回款' || !p.dueDate || p.dueDate > soon || !c || (c.ownerId || c.createdBy) !== u.id) continue;
+    items.push({ type: 'plan', id: p.id, title: p.dueDate < today ? '回款计划已逾期' : '回款计划即将到期', text: `${c.number} ${c.name} · ¥${Number(p.amount).toLocaleString('zh-CN')} · ${p.dueDate}`, link: '#/finance', at: p.dueDate + 'T00:00:00' });
+  }
+  const since = new Date(Date.now() - 14 * 86400000).toISOString();
+  const rows = db.prepare("SELECT a.*,x.display_name by_name FROM audits a LEFT JOIN users x ON x.id=a.user_id WHERE a.tenant_id=? AND a.at>? AND a.user_id<>? AND a.action IN ('assign','approve','reject') ORDER BY a.at DESC LIMIT 300").all(u.tenant_id, since, u.id);
+  for (const a of rows) {
+    const d = JSON.parse(a.details || '{}');
+    if (a.action === 'assign' && d.ownerId === u.id) {
+      const rec = row(getRecord(u, a.entity, a.entity_id));
+      if (rec) items.push({ type: 'assign', id: a.id, title: `${a.by_name || '同事'} 将${TABLES[a.entity]?.label || ''}分配给你`, text: rec.name || rec.title || '', link: a.entity === 'accounts' ? `#/accounts/${rec.id}` : a.entity === 'opportunities' ? `#/opportunities/${rec.id}` : `#/${a.entity}?q=${encodeURIComponent(rec.name || rec.title || '')}`, at: a.at });
+    } else if (a.entity === 'contracts' && (a.action === 'approve' || a.action === 'reject')) {
+      const c = row(getRecord(u, 'contracts', a.entity_id));
+      if (c && (c.submittedBy === u.id || c.ownerId === u.id)) items.push({ type: a.action, id: a.id, title: a.action === 'approve' ? (d.final ? '合同审批通过' : `合同已通过「${d.level || '审批'}」`) : '合同被驳回', text: `${c.number} ${c.name}${d.note ? ' · ' + d.note : ''}`, link: '#/contracts?q=' + encodeURIComponent(c.number || ''), at: a.at });
+    }
+  }
+  items.sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  const seen = u.notif_seen_at || '';
+  const actionable = items.filter(x => ['task', 'approval', 'plan'].includes(x.type)).length;
+  return { items: items.slice(0, 50).map(x => ({ ...x, unread: x.at > seen })), unread: items.filter(x => x.at > seen).length, actionable };
+}
+
+// ---------- 附件 ----------
+const ATTACH_ENTITIES = ['accounts', 'opportunities', 'contracts', 'leads'];
+const ATTACH_EXT = { pdf: 'application/pdf', doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', xls: 'application/vnd.ms-excel', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', ppt: 'application/vnd.ms-powerpoint', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', txt: 'text/plain', csv: 'text/csv', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', zip: 'application/zip' };
+const ATTACH_MAX = Number(process.env.ATTACH_MAX_MB || 20) * 1024 * 1024;
+const fileDir = tenantId => path.join(DATA_DIR, 'files', tenantId);
+/** 流式写入请求体到文件并计算 sha256，超过 max 则中止 */
+function receiveFile(req, dest, max) {
+  return new Promise((resolve, reject) => {
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    const out = fs.createWriteStream(dest, { flags: 'wx' });
+    const hash = crypto.createHash('sha256'); let size = 0, failed = false;
+    const fail = e => { if (failed) return; failed = true; out.destroy(); fs.rm(dest, { force: true }, () => {}); reject(e); };
+    req.on('data', chunk => {
+      if (failed) return;
+      size += chunk.length;
+      if (size > max) return fail(httpError(413, `文件不能超过 ${Math.round(max / 1048576)}MB`));
+      hash.update(chunk);
+      if (!out.write(chunk)) { req.pause(); out.once('drain', () => req.resume()); }
+    });
+    req.on('end', () => { if (failed) return; out.end(() => (size ? resolve({ size, sha256: hash.digest('hex') }) : fail(httpError(400, '文件为空')))); });
+    req.on('error', fail);
+  });
+}
+function fileName(req) {
+  let name = '';
+  try { name = decodeURIComponent(String(req.headers['x-file-name'] || '')); } catch { boom(400, '文件名编码错误'); }
+  name = path.basename(name).replace(/[\x00-\x1f"\\/]/g, '').slice(0, 200).trim();
+  if (!name) boom(400, '缺少文件名');
+  return name;
+}
+const attachRow = a => ({ id: a.id, entity: a.entity, entityId: a.entity_id, name: a.name, mime: a.mime, size: a.size, createdBy: a.created_by, createdByName: a.by_name, createdAt: a.created_at });
+async function attachmentsApi(u, req, res, url, attId, sub) {
+  const m = req.method;
+  if (!attId && m === 'GET') {
+    const entity = url.searchParams.get('entity'), entityId = url.searchParams.get('entityId');
+    if (!ATTACH_ENTITIES.includes(entity) || !getVisible(u, entity, entityId)) boom(404, '记录不存在');
+    const items = db.prepare('SELECT a.*,x.display_name by_name FROM attachments a LEFT JOIN users x ON x.id=a.created_by WHERE a.tenant_id=? AND a.entity=? AND a.entity_id=? AND a.deleted=0 ORDER BY a.created_at DESC').all(u.tenant_id, entity, entityId);
+    return send(res, 200, { items: items.map(attachRow) });
+  }
+  if (!attId && m === 'POST') {
+    if (!canWrite(u)) boom(403, '无上传权限');
+    const entity = url.searchParams.get('entity'), entityId = url.searchParams.get('entityId');
+    if (!ATTACH_ENTITIES.includes(entity) || !getVisible(u, entity, entityId)) boom(404, '记录不存在');
+    const name = fileName(req), ext = path.extname(name).slice(1).toLowerCase();
+    if (!ATTACH_EXT[ext]) boom(415, `不支持的文件类型：${ext || '无扩展名'}（允许 ${Object.keys(ATTACH_EXT).join('/')}）`);
+    const aid = newId(), dest = path.join(fileDir(u.tenant_id), aid);
+    const { size, sha256 } = await receiveFile(req, dest, ATTACH_MAX);
+    db.prepare('INSERT INTO attachments VALUES(?,?,?,?,?,?,?,?,?,?,0)').run(aid, u.tenant_id, entity, entityId, name, ATTACH_EXT[ext], size, sha256, u.id, now());
+    audit(u, 'upload', entity, entityId, { attachmentId: aid, name, size });
+    return send(res, 201, { item: { id: aid, name, size, mime: ATTACH_EXT[ext] } });
+  }
+  const a = attId && db.prepare('SELECT * FROM attachments WHERE id=? AND tenant_id=? AND deleted=0').get(attId, u.tenant_id);
+  if (!a || !getVisible(u, a.entity, a.entity_id)) boom(404, '附件不存在');
+  if (m === 'GET' && sub === 'download') {
+    const file = path.join(fileDir(u.tenant_id), a.id);
+    if (!fs.existsSync(file)) boom(410, '附件文件已丢失');
+    res.writeHead(200, {
+      'Content-Type': a.mime.startsWith('image/') && a.mime !== 'image/svg+xml' ? a.mime : 'application/octet-stream', 'Content-Length': a.size,
+      'Content-Disposition': `attachment; filename="${encodeURIComponent(a.name)}"; filename*=UTF-8''${encodeURIComponent(a.name)}`,
+      'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; sandbox", 'Cache-Control': 'private, no-store',
+    });
+    return fs.createReadStream(file).pipe(res);
+  }
+  if (m === 'DELETE' && !sub) {
+    if (!canDelete(u) && a.created_by !== u.id) boom(403, '仅上传人、经理或管理员可删除附件');
+    db.prepare('UPDATE attachments SET deleted=1 WHERE id=?').run(a.id);
+    fs.rm(path.join(fileDir(u.tenant_id), a.id), { force: true }, () => {});
+    audit(u, 'delete', 'attachments', a.id, { name: a.name, entity: a.entity, entityId: a.entity_id });
+    return send(res, 200, { ok: true });
+  }
+  boom(405, '不支持的操作');
+}
+
+// ---------- 批量导入 ----------
+const IMPORT_COLUMNS = {
+  leads: { name: ['线索姓名', '姓名', '线索名称', 'name'], company: ['公司名称', '公司', 'company'], phone: ['手机号', '电话', '联系电话', 'phone'], email: ['邮箱', 'email'], source: ['线索来源', '来源', 'source'], status: ['状态', 'status'], owner: ['负责人', 'owner'], notes: ['备注', 'notes'] },
+  accounts: { name: ['客户名称', '名称', 'name'], type: ['客户类型', '类型', 'type'], industry: ['所属行业', '行业', 'industry'], level: ['客户级别', '级别', 'level'], source: ['客户来源', '来源', 'source'], status: ['客户状态', '状态', 'status'], phone: ['联系电话', '电话', 'phone'], email: ['邮箱', 'email'], owner: ['负责人', 'owner'], address: ['地址', 'address'], foundedAt: ['成立时间', 'foundedAt'], notes: ['备注', 'notes'] },
+  contacts: { name: ['姓名', '联系人', 'name'], account: ['所属客户', '客户名称', '客户', 'account'], title: ['职位', 'title'], phone: ['电话', '手机号', 'phone'], email: ['邮箱', 'email'], isPrimary: ['主联系人', 'isPrimary'], notes: ['备注', 'notes'] },
+  opportunities: { name: ['商机名称', '名称', 'name'], account: ['客户名称', '客户', '所属客户', 'account'], amount: ['预计金额', '金额', 'amount'], probability: ['成交概率', '赢率', 'probability'], stage: ['商机阶段', '阶段', 'stage'], owner: ['负责人', 'owner'], expectedDate: ['预计成交日', '预计成交', 'expectedDate'], notes: ['备注', 'notes'] },
+};
+const IMPORT_EXAMPLE = {
+  leads: { name: '张三', company: '示例科技有限公司', phone: '13800000000', source: '官网', status: '未联系' },
+  accounts: { name: '示例科技有限公司', type: '企业客户', industry: '科技/IT', level: '重要', source: '官网', phone: '010-88886666', address: '北京市海淀区', foundedAt: '2018-06-12' },
+  contacts: { name: '李四', account: '示例科技有限公司', title: '采购经理', phone: '13900000000', isPrimary: '是' },
+  opportunities: { name: '年度采购项目', account: '示例科技有限公司', amount: '120000', probability: '40', stage: '需求确认', expectedDate: '2026-12-31' },
+};
+function importColumns(u, type) {
+  const cols = Object.entries(IMPORT_COLUMNS[type]).map(([key, aliases]) => ({ key, aliases }));
+  for (const f of customFieldsOf(u, type)) cols.push({ key: f.key, aliases: [f.label, f.key] });
+  return cols;
+}
+function importTemplate(u, type) {
+  const cols = importColumns(u, type);
+  return { headers: cols.map(c => c.aliases[0]), rows: [cols.map(c => IMPORT_EXAMPLE[type][c.key] ?? '')] };
+}
+function importRecords(u, type, text, commit) {
+  const rows = CSV.parse(text);
+  if (rows.length < 2) boom(400, '文件中没有数据行（第一行须为表头）');
+  if (rows.length > 5001) boom(400, '单次最多导入 5000 行');
+  const cols = importColumns(u, type);
+  const header = rows[0].map(h => String(h).trim().replace(/^[*＊]/, '').replace(/[（(].*?[)）]$/, '').trim());
+  const mapping = header.map(h => cols.find(c => c.aliases.some(a => a.toLowerCase() === h.toLowerCase()))?.key || null);
+  const unknown = header.filter((h, i) => h && !mapping[i]);
+  if (!mapping.includes('name')) boom(400, `缺少必需列“${cols[0].aliases[0]}”。可识别的列：${cols.map(c => c.aliases[0]).join('、')}`);
+  const accountsByName = new Map();
+  if (['contacts', 'opportunities'].includes(type)) for (const a of scoped(u, 'accounts')) accountsByName.set(a.name, accountsByName.has(a.name) ? null : a.id);
+  const existingNames = type === 'accounts' ? new Set(all(u, 'accounts').map(a => a.name)) : null;
+  const errors = [], prepared = [], seen = new Set();
+  rows.slice(1).forEach((r, idx) => {
+    const line = idx + 2;
+    try {
+      const submitted = {};
+      mapping.forEach((key, i) => { if (key) submitted[key] = String(r[i] ?? '').trim(); });
+      for (const k of Object.keys(submitted)) if (submitted[k] === '' && k !== 'name') delete submitted[k];
+      if (Object.hasOwn(submitted, 'account')) {
+        const id = accountsByName.get(submitted.account);
+        if (id === undefined) boom(400, `客户“${submitted.account}”不存在或无权访问`);
+        if (id === null) boom(400, `存在多个名为“${submitted.account}”的客户，请手工录入`);
+        submitted.accountId = id; delete submitted.account;
+      }
+      if (Object.hasOwn(submitted, 'isPrimary')) submitted.isPrimary = ['是', 'y', 'yes', 'true', '1'].includes(submitted.isPrimary.toLowerCase());
+      if (Object.hasOwn(submitted, 'amount')) submitted.amount = submitted.amount.replace(/[,，¥￥\s]/g, '');
+      if (Object.hasOwn(submitted, 'probability')) submitted.probability = submitted.probability.replace(/%$/, '');
+      for (const k of ['foundedAt', 'expectedDate']) if (submitted[k]) submitted[k] = submitted[k].replace(/[/.]/g, '-').replace(/-(\d)(?=-|$)/g, '-0$1');
+      const data = sanitize(type, submitted, {}, u);
+      resolveOwner(u, type, data, submitted);
+      validRefs(u, type, data);
+      if (existingNames) {
+        if (existingNames.has(data.name)) boom(409, `客户“${data.name}”已存在`);
+        if (seen.has(data.name)) boom(409, `文件内客户“${data.name}”重复`);
+        seen.add(data.name);
+      }
+      prepared.push(data);
+    } catch (e) {
+      if (!e.status) throw e;
+      errors.push({ line, error: e.message });
+    }
+  });
+  const result = { total: rows.length - 1, valid: prepared.length, errors: errors.slice(0, 200), errorCount: errors.length, ignoredColumns: unknown, imported: 0 };
+  if (commit) {
+    if (errors.length) boom(400, `存在 ${errors.length} 行错误，请修正后再导入`);
+    transaction(() => { for (const d of prepared) insertRecord(u, type, d); audit(u, 'import', type, '*', { count: prepared.length }); });
+    result.imported = prepared.length;
+  }
+  return result;
+}
+
+// ---------- 对账单 ----------
+function statement(u, accountId, from, to) {
+  const day = /^\d{4}-\d{2}-\d{2}$/;
+  if (!day.test(from || '') || !day.test(to || '')) boom(400, '请选择对账期间');
+  if (from > to) boom(400, '开始日期不能晚于结束日期');
+  const contracts = scoped(u, 'contracts').filter(isEffectiveContract);
+  const payments = scoped(u, 'payments');
+  const cById = new Map(contracts.map(c => [c.id, c]));
+  const accounts = scoped(u, 'accounts').filter(a => !accountId || a.id === accountId);
+  if (accountId && !accounts.length) boom(404, '客户不存在');
+  const summary = accounts.map(a => {
+    const cs = contracts.filter(c => c.accountId === a.id), ids = new Set(cs.map(c => c.id));
+    const ps = payments.filter(p => ids.has(p.contractId));
+    const before = d => d < from, within = d => d >= from && d <= to;
+    const opening = sumCents(cs.filter(c => before(contractDay(c)))) - sumCents(ps.filter(p => before(paymentDay(p))));
+    const debit = sumCents(cs.filter(c => within(contractDay(c)))), credit = sumCents(ps.filter(p => within(paymentDay(p))));
+    return { accountId: a.id, accountName: a.name, opening: yuan(opening), debit: yuan(debit), credit: yuan(credit), closing: yuan(opening + debit - credit) };
+  }).filter(x => accountId || x.opening || x.debit || x.credit || x.closing);
+  let lines = [];
+  if (accountId) {
+    const s = summary[0] || { opening: 0 };
+    const cs = contracts.filter(c => c.accountId === accountId), ids = new Set(cs.map(c => c.id));
+    lines = [
+      ...cs.filter(c => contractDay(c) >= from && contractDay(c) <= to).map(c => ({ date: contractDay(c), kind: '合同应收', ref: `${c.number} ${c.name}`, debit: c.amount, credit: 0 })),
+      ...payments.filter(p => ids.has(p.contractId) && paymentDay(p) >= from && paymentDay(p) <= to).map(p => ({ date: paymentDay(p), kind: '回款', ref: `${cById.get(p.contractId)?.number || ''} ${p.method || ''}`.trim(), debit: 0, credit: p.amount })),
+    ].sort((a, b) => a.date.localeCompare(b.date) || b.debit - a.debit);
+    let bal = cents(s.opening);
+    for (const l of lines) { bal += cents(l.debit) - cents(l.credit); l.balance = yuan(bal); }
+  }
+  const total = k => yuan(summary.reduce((x, r) => x + cents(r[k]), 0));
+  return { from, to, accountId: accountId || null, summary, lines, totals: { opening: total('opening'), debit: total('debit'), credit: total('credit'), closing: total('closing') } };
 }
 
 // ---------- 用户管理 ----------
@@ -808,13 +1154,13 @@ async function api(req, res, url) {
     createSession(found, res);
     db.prepare('UPDATE users SET last_login_at=? WHERE id=?').run(now(), found.id);
     audit(found, 'login', 'session', found.id);
-    return send(res, 200, { user: publicUser(found), settings: getSettings(found.tenant_id) });
+    return send(res, 200, { user: publicUser(found), settings: publicSettings(found) });
   }
 
   const u = authenticate(req);
   if (!u) boom(401, '请先登录');
 
-  if (p === '/api/me' && m === 'GET') return send(res, 200, { user: publicUser(u), settings: getSettings(u.tenant_id) });
+  if (p === '/api/me' && m === 'GET') return send(res, 200, { user: publicUser(u), settings: publicSettings(u) });
   if (p === '/api/logout' && m === 'POST') {
     db.prepare('DELETE FROM sessions WHERE id_hash=?').run(tokenHash(sessionToken(req)));
     res.setHeader('Set-Cookie', makeCookie('', 0));
@@ -832,7 +1178,7 @@ async function api(req, res, url) {
   }
 
   if (p === '/api/settings') {
-    if (m === 'GET') return send(res, 200, { settings: getSettings(u.tenant_id) });
+    if (m === 'GET') return send(res, 200, { settings: publicSettings(u) });
     if (m === 'PUT' || m === 'PATCH') {
       if (u.role !== 'admin') boom(403, '仅管理员可修改系统设置');
       const b = await readBody(req), cur = getSettings(u.tenant_id);
@@ -846,13 +1192,70 @@ async function api(req, res, url) {
           dicts[k] = list;
         }
       }
-      const next = { systemName: text(b.systemName, cur.systemName), companyName: text(b.companyName, cur.companyName), dicts };
+      const next = { ...cur, systemName: text(b.systemName, cur.systemName), companyName: text(b.companyName, cur.companyName), dicts };
+      if (b.customFields !== undefined) next.customFields = validateCustomFields(b.customFields, cur.customFields);
+      if (b.approval !== undefined) next.approval = validateApproval(b.approval);
+      if (b.webhook !== undefined) {
+        const w = b.webhook || {};
+        const url = String(w.url ?? cur.webhook.url).trim();
+        if (!validWebhookUrl(url)) boom(400, 'Webhook 地址必须为 https:// 开头的有效 URL');
+        next.webhook = { url, kind: ['wecom', 'dingtalk', 'generic'].includes(w.kind) ? w.kind : cur.webhook.kind, events: Array.isArray(w.events) ? w.events.filter(e => WEBHOOK_EVENTS.includes(e)) : cur.webhook.events };
+      }
       db.prepare('UPDATE tenants SET settings=?,name=? WHERE id=?').run(JSON.stringify(next), next.companyName, u.tenant_id);
-      audit(u, 'update', 'settings', u.tenant_id, { before: cur });
-      return send(res, 200, { settings: getSettings(u.tenant_id) });
+      audit(u, 'update', 'settings', u.tenant_id, { before: { ...cur, webhook: { ...cur.webhook, url: cur.webhook.url ? '***' : '' } } });
+      return send(res, 200, { settings: publicSettings(u) });
     }
   }
 
+  if (p === '/api/settings/webhook-test' && m === 'POST') {
+    if (u.role !== 'admin') boom(403, '仅管理员可操作');
+    const w = getSettings(u.tenant_id).webhook;
+    if (!w.url) boom(400, '请先保存 Webhook 地址');
+    notifyWebhook(u, (w.events || [])[0] || 'approval', `${getSettings(u.tenant_id).systemName} 测试消息`, ['Webhook 配置成功', `发送人：${u.display_name}`]);
+    return send(res, 200, { ok: true });
+  }
+  if (p === '/api/settings/logo') {
+    if (m === 'GET') {
+      const st = getSettings(u.tenant_id), file = path.join(fileDir(u.tenant_id), 'logo');
+      if (!st.logo || !fs.existsSync(file)) boom(404, '未设置 Logo');
+      res.writeHead(200, { 'Content-Type': st.logo, 'Cache-Control': 'private, max-age=300', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'" });
+      return fs.createReadStream(file).pipe(res);
+    }
+    if (u.role !== 'admin') boom(403, '仅管理员可修改 Logo');
+    const st = getSettings(u.tenant_id);
+    if (m === 'POST') {
+      const mime = String(req.headers['content-type'] || '').split(';')[0];
+      if (!['image/png', 'image/jpeg', 'image/webp'].includes(mime)) boom(415, 'Logo 仅支持 PNG / JPG / WebP');
+      const file = path.join(fileDir(u.tenant_id), 'logo'), tmp = file + '.' + newId();
+      await receiveFile(req, tmp, 512 * 1024);
+      fs.renameSync(tmp, file);
+      st.logo = mime;
+    } else if (m === 'DELETE') { st.logo = ''; fs.rmSync(path.join(fileDir(u.tenant_id), 'logo'), { force: true }); }
+    else boom(405, '不支持的操作');
+    db.prepare('UPDATE tenants SET settings=? WHERE id=?').run(JSON.stringify(st), u.tenant_id);
+    audit(u, 'update', 'settings', u.tenant_id, { logo: st.logo });
+    return send(res, 200, { settings: publicSettings(u) });
+  }
+  if (p === '/api/notifications') {
+    if (m === 'GET') return send(res, 200, notifications(u));
+    if (m === 'POST') { db.prepare('UPDATE users SET notif_seen_at=? WHERE id=?').run(now(), u.id); return send(res, 200, { ok: true }); }
+  }
+  const attMatch = p.match(/^\/api\/attachments(?:\/([^/]+)(?:\/(download))?)?$/);
+  if (attMatch) return attachmentsApi(u, req, res, url, attMatch[1], attMatch[2]);
+  if (p === '/api/statements' && m === 'GET') {
+    const r = statement(u, url.searchParams.get('accountId') || '', url.searchParams.get('from'), url.searchParams.get('to'));
+    if (url.searchParams.get('format') === 'csv') {
+      if (!canWrite(u)) boom(403, '没有导出权限');
+      audit(u, 'export', 'statements', r.accountId || '*', { from: r.from, to: r.to });
+      if (r.accountId) {
+        const s0 = r.summary[0];
+        return sendCSV(res, `对账单_${s0.accountName}_${r.from}_${r.to}.csv`, ['日期', '类型', '单据', '应收增加', '回款', '余额'],
+          [[r.from, '期初余额', '', '', '', s0.opening], ...r.lines.map(l => [l.date, l.kind, l.ref, l.debit || '', l.credit || '', l.balance]), [r.to, '期末余额', '', s0.debit, s0.credit, s0.closing]]);
+      }
+      return sendCSV(res, `对账汇总_${r.from}_${r.to}.csv`, ['客户', '期初余额', '本期应收', '本期回款', '期末余额'], r.summary.map(x => [x.accountName, x.opening, x.debit, x.credit, x.closing]));
+    }
+    return send(res, 200, r);
+  }
   const userMatch = p.match(/^\/api\/users(?:\/([^/]+))?$/);
   if (userMatch) {
     if (!userMatch[1] && m === 'GET') return send(res, 200, { items: listUsers(u) });
@@ -905,12 +1308,35 @@ async function api(req, res, url) {
     if (!canWrite(u)) boom(403, '无新增权限');
     const submitted = await readBody(req);
     if (type === 'leads' && Object.hasOwn(submitted, 'convertedAccountId')) boom(400, '不能自行设置转换关联');
-    const data = sanitize(type, submitted);
+    const data = sanitize(type, submitted, {}, u);
     resolveOwner(u, type, data, submitted);
-    if (type === 'contracts') { guardContractStatus(u, { status: '草稿' }, data); if (!data.number) data.number = nextContractNumber(u); }
+    let submitNow = false;
+    if (type === 'contracts') {
+      submitNow = guardContractStatus(u, { status: '草稿' }, data) === 'submit';
+      if (submitNow) data.status = '草稿';
+      if (!data.number) data.number = nextContractNumber(u);
+    }
     validRefs(u, type, data);
-    const item = transaction(() => { const it = insertRecord(u, type, data); audit(u, 'create', type, it.id); return it; });
+    if (submitNow) startApproval(u, data);
+    const item = transaction(() => {
+      const it = insertRecord(u, type, data); audit(u, 'create', type, it.id);
+      if (submitNow) audit(u, 'submit', 'contracts', it.id);
+      if (data.ownerId && data.ownerId !== u.id) audit(u, 'assign', type, it.id, { ownerId: data.ownerId, owner: data.owner });
+      return it;
+    });
+    if (submitNow) notifyApprovalPending(u, item);
     return send(res, 201, { item });
+  }
+
+  // 批量导入：GET 下载模板，POST {csv, commit}
+  if (recordId === 'import' && !act) {
+    if (!IMPORT_COLUMNS[type]) boom(404, '该对象不支持导入');
+    if (m === 'GET') { const t = importTemplate(u, type); return sendCSV(res, `${type}_import_template.csv`, t.headers, t.rows); }
+    if (m === 'POST') {
+      if (!canWrite(u)) boom(403, '无导入权限');
+      const b = await readBody(req, 6 * 1024 * 1024);
+      return send(res, 200, importRecords(u, type, String(b.csv || ''), b.commit === true));
+    }
   }
 
   // 批量操作：POST /api/{type}/batch {ids, action:'delete'|'assign', owner}
@@ -943,10 +1369,11 @@ async function api(req, res, url) {
           const before = row(old), data = { ...before, owner, ownerId: target.id };
           if (type === 'leads' && before.status === '未联系') data.status = '已分配';
           updateRecord(u, key, data);
-          audit(u, 'assign', type, key, { before: { owner: before.owner }, owner });
+          audit(u, 'assign', type, key, { before: { owner: before.owner, ownerId: before.ownerId }, owner, ownerId: target.id });
           done.push(key);
         }
       });
+      if (done.length && target.id !== u.id) notifyWebhook(u, 'assign', `${TABLES[type].label}分配`, [`${done.length} 条${TABLES[type].label}已分配给 ${owner}`, `操作人：${u.display_name}`]);
     } else boom(400, '不支持的批量操作');
     return send(res, 200, { done, failed });
   }
@@ -994,19 +1421,29 @@ async function api(req, res, url) {
     if (type === 'contracts' && act === 'submit') {
       const c = row(old);
       if (c.status !== '草稿') boom(409, '仅草稿合同可以提交审批');
-      updateRecord(u, recordId, { ...c, status: '审批中' });
-      audit(u, 'submit', 'contracts', recordId);
-      return send(res, 200, { ok: true });
+      startApproval(u, c);
+      transaction(() => { updateRecord(u, recordId, c); audit(u, 'submit', 'contracts', recordId); });
+      notifyApprovalPending(u, c);
+      return send(res, 200, { ok: true, levels: c.approvalLevels });
     }
     if (type === 'contracts' && act === 'approve') {
-      if (!canManage(u)) boom(403, '仅经理或管理员可审批合同');
       const c = row(old), b = await readBody(req);
       if (c.status !== '审批中') boom(409, '合同不在审批中');
-      const approved = b.approved === true;
-      const note = String(b.note || '').slice(0, 500);
-      updateRecord(u, recordId, { ...c, status: approved ? '已签订' : '草稿', signedAt: approved ? (c.signedAt || ymd(new Date())) : c.signedAt, approvalNote: note });
-      audit(u, approved ? 'approve' : 'reject', 'contracts', recordId, { note });
-      return send(res, 200, { ok: true, status: approved ? '已签订' : '草稿' });
+      if (!canApprove(u, c)) boom(403, c.submittedBy === u.id ? '不能审批自己提交的合同' : `当前节点「${currentLevel(c)?.name || '审批'}」无权审批`);
+      const approved = b.approved === true, note = String(b.note || '').slice(0, 500);
+      const level = currentLevel(c)?.name || '审批';
+      const history = [...(c.approvalHistory || []), { action: approved ? 'approve' : 'reject', level, by: u.id, byName: u.display_name, note, at: now() }].slice(-50);
+      let next, final = false;
+      if (!approved) next = { ...c, status: '草稿', approvalStep: 0, approvalNote: note, approvalHistory: history };
+      else {
+        const step = (c.approvalStep || 0) + 1;
+        final = step >= (c.approvalLevels || []).length;
+        next = { ...c, approvalStep: step, approvalNote: note, approvalHistory: history, ...(final ? { status: '已签订', signedAt: c.signedAt || ymd(new Date()) } : {}) };
+      }
+      transaction(() => { updateRecord(u, recordId, next); audit(u, approved ? 'approve' : 'reject', 'contracts', recordId, { note, level, final }); });
+      if (approved && !final) notifyApprovalPending(u, next);
+      else notifyWebhook(u, 'approval', approved ? '合同审批通过' : '合同被驳回', [`${c.number} ${c.name}`, `金额：¥${c.amount}`, `审批人：${u.display_name}（${level}）`, ...(note ? [`意见：${note}`] : [])]);
+      return send(res, 200, { ok: true, status: next.status, pending: approved && !final ? currentLevel(next) : null });
     }
     boom(404, '接口不存在');
   }
@@ -1019,11 +1456,19 @@ async function api(req, res, url) {
     if (type === 'leads' && Object.hasOwn(submitted, 'convertedAccountId')) boom(400, '不能自行设置转换关联');
     const before = row(old);
     const existing = { ...before }; for (const k of ['id', 'createdAt', 'updatedAt', 'createdBy']) delete existing[k];
-    const data = sanitize(type, submitted, existing);
+    const data = sanitize(type, submitted, existing, u);
     resolveOwner(u, type, data, submitted, before);
-    if (type === 'contracts') guardContractStatus(u, before, data);
+    const submitNow = type === 'contracts' && guardContractStatus(u, before, data) === 'submit';
     validRefs(u, type, data, recordId);
-    transaction(() => { updateRecord(u, recordId, data); audit(u, 'update', type, recordId, { before }); });
+    if (submitNow) startApproval(u, data);
+    if (type === 'contracts' && before.status === '审批中' && data.status === '草稿') data.approvalHistory = [...(data.approvalHistory || []), { action: 'withdraw', by: u.id, byName: u.display_name, at: now() }];
+    transaction(() => {
+      updateRecord(u, recordId, data); audit(u, 'update', type, recordId, { before });
+      if (submitNow) audit(u, 'submit', 'contracts', recordId);
+      if (data.ownerId && data.ownerId !== before.ownerId && data.ownerId !== u.id) audit(u, 'assign', type, recordId, { ownerId: data.ownerId, owner: data.owner });
+    });
+    if (submitNow) notifyApprovalPending(u, { id: recordId, ...data });
+    if (data.ownerId && data.ownerId !== before.ownerId && data.ownerId !== u.id) notifyWebhook(u, 'assign', `${TABLES[type].label}分配`, [`${data.name || data.title || ''} 已分配给 ${data.owner}`, `操作人：${u.display_name}`]);
     resetScope(u);
     return send(res, 200, { item: row(getRecord(u, type, recordId)) });
   }

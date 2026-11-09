@@ -48,6 +48,9 @@ const ICONS = {
   visit: '<path d="M12 21s-7-6.1-7-11a7 7 0 0114 0c0 4.9-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/>',
   meeting: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
   download: '<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>',
+  upload: '<path d="M12 15V3M7 8l5-5 5 5M5 21h14"/>',
+  clip: '<path d="M21 11l-8.5 8.5a5 5 0 01-7-7L14 4a3.5 3.5 0 015 5l-8.5 8.5a2 2 0 01-3-3L15 7"/>',
+  print: '<path d="M6 9V3h12v6M6 18H4a1 1 0 01-1-1v-6a2 2 0 012-2h14a2 2 0 012 2v6a1 1 0 01-1 1h-2"/><rect x="6" y="14" width="12" height="7"/>',
   logout: '<path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/>',
   key: '<circle cx="8" cy="15" r="4"/><path d="M10.8 12.2L20 3M16 7l3 3"/>',
   user: '<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-7 8-7s8 3 8 7"/>',
@@ -78,6 +81,7 @@ const MENU = [
   { key: 'team', label: '团队管理', icon: 'org' },
   { key: 'settings', label: '系统设置', icon: 'gear', roles: ['admin', 'manager'] },
 ];
+const IMPORTABLE = ['leads', 'accounts', 'contacts', 'opportunities'];
 const PAGE_TITLE = { dashboard: '工作台', leads: '线索管理', accounts: '客户管理', contacts: '联系人', opportunities: '商机管理', contracts: '合同订单', finance: '财务回款', tasks: '跟进任务', activities: '跟进记录', reports: '数据报表', team: '团队管理', settings: '系统设置' };
 
 // ======================= 表单字段定义 =======================
@@ -157,6 +161,16 @@ const dict = k => settings?.dicts?.[k] || [];
 const isOverdue = t => t.status !== '已完成' && t.dueDate && t.dueDate < ymd();
 const accountName = id => R.accounts.get(id)?.name || '';
 const contractLabel = id => { const c = R.contracts.get(id); return c ? `${c.number || ''} ${c.name}`.trim() : ''; };
+/** 内置字段 + 自定义字段 */
+function formFields(type) {
+  const custom = (settings.customFields?.[type] || []).map(f => [f.key, f.label, f.type === 'select' ? f.options : f.type, f.required ? 1 : 0, f.type === 'textarea' ? 1 : 0]);
+  return [...FORMS[type], ...custom];
+}
+const customCols = type => (settings.customFields?.[type] || []).filter(f => f.inList).map(f => [f.key, f.label, f.type === 'date' ? 'date' : '']);
+const customKv = (type, x) => (settings.customFields?.[type] || []).map(f => `<div class="kv ${f.type === 'textarea' ? 'wide' : ''}"><span>${esc(f.label)}</span><b>${esc(x[f.key] ?? '') || '—'}</b></div>`).join('');
+const curLevel = c => (c.approvalLevels || [])[c.approvalStep || 0] || null;
+const canApproveC = c => !!me && c.status === '审批中' && (me.role === 'admin' || (curLevel(c) ? me.role === curLevel(c).role && c.submittedBy !== me.id : me.role === 'manager'));
+const fileSize = n => (n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB');
 const avatar = (name, cls = '') => `<span class="avatar ${cls}">${esc(String(name || '?').slice(0, 1))}</span>`;
 const greeting = () => { const h = new Date().getHours(); return h < 6 ? '凌晨好' : h < 11 ? '上午好' : h < 13 ? '中午好' : h < 18 ? '下午好' : '晚上好'; };
 const weekday = () => '日一二三四五六'[new Date().getDay()];
@@ -286,7 +300,7 @@ function renderShell(r) {
   const shell = $('#shell');
   const html = `
     <aside class="aside" id="aside">
-      <a class="brand" href="#/dashboard"><span class="logo">N</span><span class="navtext">${esc(settings.systemName)}</span><small class="navtext">V1.1</small></a>
+      <a class="brand" href="#/dashboard">${settings.logo ? `<img class="logo img" src="/api/settings/logo?v=${encodeURIComponent(settings.logoV || '')}" alt="">` : '<span class="logo">N</span>'}<span class="navtext">${esc(settings.systemName)}</span><small class="navtext">V1.1</small></a>
       <nav>${items}</nav>
       <div class="side-bottom navtext">${esc(settings.companyName)}<br><span>企业版 · 数据本地存储</span></div>
     </aside>
@@ -296,7 +310,7 @@ function renderShell(r) {
         <button class="iconbtn" data-act="toggle-nav" aria-label="切换菜单">${icon('menu')}</button>
         <h1 class="page-title">${PAGE_TITLE[active]}</h1>
         <div class="gsearch">${icon('search')}<input id="gsearch" placeholder="搜索客户、线索、商机、合同…" autocomplete="off"><div class="gresults" id="gresults" hidden></div></div>
-        <a class="iconbtn bell" href="#/tasks?view=due" title="今日及逾期任务">${icon('bell')}<span class="badge" id="bellBadge" hidden></span></a>
+        <div class="notif"><button class="iconbtn bell" data-act="notif" title="消息通知" aria-label="消息通知">${icon('bell')}<span class="badge" id="bellBadge" hidden></span></button><div class="dropdown notif-panel" id="notifPanel" hidden></div></div>
         <div class="usermenu">
           <button class="userbtn" data-act="user-menu">${avatar(me.name, 'blue')}<span class="uname">${esc(me.name)}</span>${icon('down', 'chev')}</button>
           <div class="dropdown" id="userDropdown" hidden>
@@ -325,13 +339,24 @@ function renderShell(r) {
 }
 
 async function refreshBell() {
-  if (!me) return;
+  if (!me) return null;
   try {
-    const { items } = await API.get('/tasks');
-    const n = items.filter(t => t.status !== '已完成' && t.dueDate && t.dueDate <= ymd()).length;
-    const b = $('#bellBadge'); if (!b) return;
-    b.hidden = !n; b.textContent = n > 99 ? '99+' : n;
-  } catch { /* ignore */ }
+    const r = await API.get('/notifications');
+    const b = $('#bellBadge'); if (!b) return r;
+    b.hidden = !r.unread; b.textContent = r.unread > 99 ? '99+' : r.unread;
+    return r;
+  } catch { return null; }
+}
+const NOTIF_ICON = { task: 'calcheck', approval: 'file', plan: 'coins', assign: 'user', approve: 'check', reject: 'x' };
+async function openNotifications() {
+  const panel = $('#notifPanel');
+  if (!panel.hidden) { panel.hidden = true; return; }
+  const r = await refreshBell();
+  if (!r) return;
+  panel.innerHTML = `<div class="dd-head row"><b>消息通知</b><small>${r.actionable} 项待处理</small></div>
+    ${r.items.length ? `<div class="notif-list">${r.items.map(n => `<a href="${esc(n.link)}" class="notif-item ${n.unread ? 'unread' : ''}"><span class="n-ic ${n.type}">${icon(NOTIF_ICON[n.type] || 'bell')}</span><span><b>${esc(n.title)}</b><small>${esc(n.text)}</small><em>${relTime(n.at)}</em></span></a>`).join('')}</div>` : '<div class="empty small">暂无消息</div>'}`;
+  panel.hidden = false;
+  if (r.unread) { await API.post('/notifications').catch(() => {}); $('#bellBadge').hidden = true; }
 }
 
 function bindGlobalSearch() {
@@ -351,7 +376,11 @@ function bindGlobalSearch() {
   });
   input.addEventListener('input', run);
   input.addEventListener('focus', () => { if (input.value.trim()) box.hidden = false; });
-  document.addEventListener('click', e => { if (!e.target.closest('.gsearch')) box.hidden = true; if (!e.target.closest('.usermenu')) { const d = $('#userDropdown'); if (d) d.hidden = true; } });
+  document.addEventListener('click', e => {
+    if (!e.target.closest('.gsearch')) box.hidden = true;
+    if (!e.target.closest('.usermenu')) { const d = $('#userDropdown'); if (d) d.hidden = true; }
+    if (!e.target.closest('.notif') || e.target.closest('.notif-item')) { const d = $('#notifPanel'); if (d) d.hidden = true; }
+  });
   box.addEventListener('click', e => { if (e.target.closest('a')) { box.hidden = true; input.value = ''; } });
 }
 
@@ -409,7 +438,7 @@ function rowActions(type, x) {
   if (type === 'leads' && canEdit() && !x.convertedAccountId) b.push(btn('assign', '分配'), btn('convert', '转客户'));
   if (type === 'leads' && x.convertedAccountId) b.push(`<a class="textbtn" href="#/accounts/${esc(x.convertedAccountId)}">已转客户</a>`);
   if (type === 'contracts' && canEdit() && x.status === '草稿') b.push(btn('submit-contract', '提交审批'));
-  if (type === 'contracts' && canManage() && x.status === '审批中') b.push(btn('approve-contract', '审批'));
+  if (type === 'contracts' && canApproveC(x)) b.push(btn('approve-contract', `审批${curLevel(x) ? '·' + curLevel(x).name.replace(/审批$/, '') : ''}`));
   if (type === 'contracts' && canEdit() && x.status !== '已作废') b.push(btn('pay-contract', '登记回款'));
   if (type === 'plans' && canEdit() && x.status !== '已回款') b.push(btn('plan-paid', '确认回款'));
   if (canManage()) b.push(btn('delete', '删除', '', 'danger'));
@@ -452,6 +481,7 @@ function mountList(container, type, opts = {}) {
         <span class="batch" id="batchBar" hidden><span class="muted" id="batchCount"></span>
           ${def.batch && canEdit() && FORMS[type].some(f => f[0] === 'ownerId') ? '<button class="btn light small" data-act="batch-assign">批量分配</button>' : ''}
           ${def.batch && canManage() ? '<button class="btn light small danger" data-act="batch-delete">批量删除</button>' : ''}</span>
+        ${canEdit() && IMPORTABLE.includes(type) ? `<button class="btn light" data-act="import" data-type="${type}">${icon('upload')}导入</button>` : ''}
         ${canEdit() ? `<button class="btn light" data-act="export">${icon('download')}导出</button>` : ''}
         ${canEdit() && def.create ? `<button class="btn" data-act="create" data-type="${type}">${icon('plus')}${def.create}</button>` : ''}
       </div>
@@ -474,7 +504,7 @@ async function loadList() {
   if (!r.items.length && L.page > 1) { L.page = Math.max(1, Math.ceil(r.total / L.pageSize)); return loadList(); }
   L.items = r.items;
   const def = LISTS[L.type];
-  const cols = def.cols.filter(([k]) => !(k in L.fixed));
+  const cols = [...def.cols, ...customCols(L.type)].filter(([k]) => !(k in L.fixed));
   $('#listBody', L.container).innerHTML = table(L.type, cols, r.items, { selectable: def.batch && canEdit(), selected: L.selected }) + (r.total ? pager(r.total, L.page, L.pageSize) : '');
   updateBatchBar();
 }
@@ -504,12 +534,16 @@ function fieldControl(type, field, record) {
   else if (kind === 'opportunity') input = `<select class="field" name="${key}" data-role="opportunity"><option value="">不关联</option>${[...R.opportunities.values()].map(o => `<option value="${esc(o.id)}" data-account="${esc(o.accountId)}" ${o.id === v ? 'selected' : ''}>${esc(o.name)} · ${money(o.amount)}</option>`).join('')}</select>`;
   else if (kind === 'user') input = `<select class="field" name="${key}">${optionList('user', v, '未分配')}</select>`;
   else if (kind === 'contractStatus') {
-    const opts = canManage() ? CONTRACT_STATUS : CONTRACT_STATUS.filter(s => ['草稿', '审批中'].includes(s) || s === v);
+    const signed = ['已签订', '执行中', '已完成'];
+    const opts = isAdmin() ? CONTRACT_STATUS
+      : canManage() ? CONTRACT_STATUS.filter(s => ['草稿', '审批中', '已作废'].includes(s) || s === v || (signed.includes(v) && signed.includes(s)))
+        : CONTRACT_STATUS.filter(s => ['草稿', '审批中'].includes(s) || s === v);
     input = `<select class="field" name="${key}">${opts.map(o => `<option ${o === (v || '草稿') ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
   } else if (Array.isArray(kind) || kind.startsWith('dict:')) input = `<select class="field" name="${key}">${optionList(kind, v, required ? false : '请选择')}</select>`;
   else if (kind === 'money') input = `<input class="field" type="number" name="${key}" step="0.01" min="0" max="1000000000000" value="${esc(v)}" ${req} inputmode="decimal">`;
   else if (kind === 'percent') input = `<input class="field" type="number" name="${key}" step="1" min="0" max="100" value="${esc(v)}">`;
   else if (kind === 'datetime') input = `<input class="field" type="datetime-local" name="${key}" value="${esc(String(v).slice(0, 16))}">`;
+  else if (kind === 'number') input = `<input class="field" type="number" step="any" name="${key}" value="${esc(v)}" ${req}>`;
   else input = `<input class="field" type="${kind}" name="${key}" value="${esc(v)}" ${req} maxlength="3000">`;
   return `<label class="fld ${wide || kind === 'textarea' ? 'wide' : ''}"><span>${label}${required ? ' <i class="req">*</i>' : ''}</span>${input}</label>`;
 }
@@ -553,7 +587,7 @@ function confirmBox(message, okText = '确定', danger = true) {
 
 function formToBody(type, fd) {
   const body = {};
-  for (const [key, , kind] of FORMS[type]) {
+  for (const [key, , kind] of formFields(type)) {
     if (kind === 'checkbox') { body[key] = fd.has(key); continue; }
     if (!fd.has(key)) continue;
     const v = String(fd.get(key)).trim();
@@ -572,8 +606,8 @@ async function editRecord(type, id = null, preset = {}) {
   }
   openModal({
     title: `${id ? '编辑' : '新增'}${ENTITY_LABEL[type]}`,
-    wide: FORMS[type].length > 6,
-    body: `<div class="form-grid">${FORMS[type].map(f => fieldControl(type, f, record)).join('')}</div>`,
+    wide: formFields(type).length > 6,
+    body: `<div class="form-grid">${formFields(type).map(f => fieldControl(type, f, record)).join('')}</div>`,
     onSubmit: async fd => {
       await (id ? API.patch(`/${type}/${id}`, formToBody(type, fd)) : API.post(`/${type}`, formToBody(type, fd)));
       toast('已保存'); rerender();
@@ -583,7 +617,7 @@ async function editRecord(type, id = null, preset = {}) {
 
 async function viewRecord(type, id) {
   const { item } = await API.get(`/${type}/${id}`);
-  const rows = FORMS[type].map(([k, label, kind]) => {
+  const rows = formFields(type).map(([k, label, kind]) => {
     let v = item[k];
     if (kind === 'user') v = item.owner; else if (kind === 'account') v = accountName(v); else if (kind === 'contract') v = contractLabel(v); else if (kind === 'opportunity') v = R.opportunities.get(v)?.name;
     else if (kind === 'money') v = money(v); else if (kind === 'checkbox') v = v ? '是' : '否'; else if (kind === 'datetime') v = fmtDateTime(v);
@@ -608,6 +642,57 @@ function assignModal(type, ids) {
       if (ui.list) ui.list.selected.clear();
       rerender();
     },
+  });
+}
+
+// ======================= 附件 =======================
+async function filesPane(entity, id) {
+  const { items } = await API.get(`/attachments?entity=${entity}&entityId=${encodeURIComponent(id)}`);
+  return `<div class="files" data-entity="${entity}" data-id="${esc(id)}">
+    <div class="sub-head">${canEdit() ? `<label class="btn light small">${icon('upload')}上传文件<input type="file" hidden multiple data-act-change="upload" data-entity="${entity}" data-id="${esc(id)}"></label>` : ''}<span class="muted small">支持 PDF、Office、图片、TXT/CSV、ZIP，单个不超过 20MB</span></div>
+    ${items.length ? `<div class="tbl-wrap plain"><table><thead><tr><th>文件名</th><th>大小</th><th>上传人</th><th>上传时间</th><th class="ops">操作</th></tr></thead><tbody>${items.map(f => `<tr><td><a class="link" href="/api/attachments/${esc(f.id)}/download">${icon('clip')}${esc(f.name)}</a></td><td>${fileSize(f.size)}</td><td>${esc(f.createdByName || '—')}</td><td>${fmtDateTime(f.createdAt)}</td><td class="ops">${canManage() || f.createdBy === me.id ? `<button class="textbtn danger" data-act="file-del" data-id="${esc(f.id)}">删除</button>` : ''}</td></tr>`).join('')}</tbody></table></div>` : `<div class="empty small">${icon('clip')}<p>暂无文件</p></div>`}</div>`;
+}
+async function uploadFiles(input) {
+  const { entity, id } = input.dataset, box = input.closest('.files');
+  for (const f of input.files) {
+    const r = await fetch(`/api/attachments?entity=${entity}&entityId=${encodeURIComponent(id)}`, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': f.type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(f.name) }, body: f });
+    if (!r.ok) { toast(`${f.name}：${(await r.json().catch(() => ({}))).error || '上传失败'}`, true); continue; }
+    toast(`已上传 ${f.name}`);
+  }
+  box.outerHTML = await filesPane(entity, id);
+}
+
+// ======================= 批量导入 =======================
+async function decodeFile(file) {
+  const buf = await file.arrayBuffer();
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { return new TextDecoder('gbk').decode(buf); }
+}
+function importModal(type) {
+  const dlg = openModal({
+    title: `批量导入${ENTITY_LABEL[type]}`, wide: true, submitText: '确认导入',
+    body: `<ol class="howto"><li>下载 <a class="link" href="/api/${type}/import">导入模板</a>，按表头填写（带 * 为必填；负责人填成员姓名${['contacts', 'opportunities'].includes(type) ? '；客户填系统中已有的客户名称' : ''}）。</li>
+      <li>Excel 中“另存为 CSV（UTF-8 或默认编码均可）”，选择文件后系统先预检，全部通过才能导入。</li></ol>
+      <label class="fld wide"><span>CSV 文件</span><input class="field" type="file" accept=".csv,.txt,text/csv" name="file" data-role="import-file"></label><div id="importResult"></div>`,
+    onSubmit: async (fd, form) => {
+      if (!form.csvText) { toast('请先选择文件并完成预检', true); return false; }
+      const r = await API.post(`/${type}/import`, { csv: form.csvText, commit: true });
+      toast(`已导入 ${r.imported} 条${ENTITY_LABEL[type]}`); rerender();
+    },
+  });
+  const form = dlg.querySelector('form'), submit = form.querySelector('[type=submit]');
+  submit.disabled = true;
+  form.querySelector('[data-role=import-file]').addEventListener('change', async e => {
+    const file = e.target.files[0]; form.csvText = ''; submit.disabled = true;
+    if (!file) return;
+    const out = $('#importResult', dlg); out.innerHTML = '<div class="loading">预检中…</div>';
+    try {
+      const text = await decodeFile(file);
+      const r = await API.post(`/${type}/import`, { csv: text });
+      out.innerHTML = `<div class="import-sum"><span>共 <b>${r.total}</b> 行</span><span class="ok">可导入 <b>${r.valid}</b></span><span class="${r.errorCount ? 'neg' : ''}">错误 <b>${r.errorCount}</b></span></div>
+        ${r.ignoredColumns.length ? `<p class="muted small">未识别的列（将忽略）：${r.ignoredColumns.map(esc).join('、')}</p>` : ''}
+        ${r.errorCount ? `<div class="tbl-wrap plain"><table class="mini edit"><thead><tr><th>行号</th><th>错误</th></tr></thead><tbody>${r.errors.map(x => `<tr><td>${x.line}</td><td>${esc(x.error)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="ok">✓ 预检通过，可以导入</p>'}`;
+      if (!r.errorCount && r.valid) { form.csvText = text; submit.disabled = false; }
+    } catch (err) { out.innerHTML = `<p class="neg">${esc(err.message)}</p>`; }
   });
 }
 
@@ -724,14 +809,14 @@ async function pageDashboard() {
 async function pageAccount(id) {
   const o = await API.get(`/accounts/${id}/overview`);
   const a = o.account, primary = o.contacts.find(c => c.isPrimary) || o.contacts[0];
-  const tabs = [['info', '基本信息'], ['contacts', `联系人 ${o.contacts.length}`], ['activities', `跟进记录 ${o.activities.length}`], ['opportunities', `商机 ${o.opportunities.length}`], ['contracts', `合同 ${o.contracts.length}`], ['payments', `回款 ${o.payments.length}`], ['tasks', `任务 ${o.tasks.length}`]];
+  const tabs = [['info', '基本信息'], ['contacts', `联系人 ${o.contacts.length}`], ['activities', `跟进记录 ${o.activities.length}`], ['opportunities', `商机 ${o.opportunities.length}`], ['contracts', `合同 ${o.contracts.length}`], ['payments', `回款 ${o.payments.length}`], ['tasks', `任务 ${o.tasks.length}`], ['files', '相关文件']];
   const tab = ui.tabs.account?.id === id ? ui.tabs.account.tab : 'info';
   ui.tabs.account = { id, tab };
   const sub = (type, items, cols) => `<div class="sub-head">${canEdit() ? `<button class="btn light small" data-act="create" data-type="${type}" data-account="${esc(id)}">${icon('plus')}新增${ENTITY_LABEL[type]}</button>` : ''}</div>${table(type, cols, items)}`;
   const panes = {
     info: `<div class="detail-grid"><div class="kv-grid">
         ${[['客户名称', a.name], ['客户类型', a.type], ['所属行业', a.industry], ['客户级别', a.level], ['客户来源', a.source], ['成立时间', a.foundedAt], ['主联系人', primary ? `${primary.name}${primary.phone ? '　' + primary.phone : ''}` : ''], ['联系电话', a.phone], ['邮箱', a.email], ['负责人', a.owner], ['地址', a.address], ['创建时间', fmtDateTime(a.createdAt)]].map(([k, v]) => `<div class="kv"><span>${k}</span><b>${esc(v || '—')}</b></div>`).join('')}
-        <div class="kv wide"><span>备注</span><b>${esc(a.notes || '—')}</b></div></div>
+        ${customKv('accounts', a)}<div class="kv wide"><span>备注</span><b>${esc(a.notes || '—')}</b></div></div>
       <div class="portrait"><h4>客户画像</h4><div class="pgrid">
         <div><span>跟进次数</span><b>${o.stats.activities}</b></div><div><span>进行中商机</span><b>${o.stats.opportunities}</b></div>
         <div><span>合同金额</span><b>${money(o.stats.contractAmount)}</b></div><div><span>回款金额</span><b>${money(o.stats.received)}</b></div></div>
@@ -742,6 +827,7 @@ async function pageAccount(id) {
     contracts: sub('contracts', o.contracts, LISTS.contracts.cols.filter(c => c[0] !== 'accountId')),
     payments: table('payments', LISTS.payments.cols.filter(c => c[0] !== 'customer'), o.payments),
     tasks: sub('tasks', o.tasks, LISTS.tasks.cols.filter(c => c[0] !== 'accountId')),
+    files: tab === 'files' ? await filesPane('accounts', id) : '',
   };
   $('#content').innerHTML = `
     <a class="back" href="#/accounts">${icon('left')}返回客户列表</a>
@@ -818,9 +904,10 @@ async function pageOpportunity(id) {
       ${o.stage === '输单' ? '<p class="center"><span class="tag red">该商机已输单</span></p>' : ''}
     </section>
     <section class="panel">
-      <div class="tabs">${[['info', '基本信息'], ['activities', `跟进记录 ${ov?.activities.length || 0}`], ['contracts', `相关合同 ${contracts.length}`]].map(([k, l]) => `<button class="tab ${k === tab ? 'on' : ''}" data-act="opp-tab" data-tab="${k}">${l}</button>`).join('')}</div>
-      <div class="tab-pane">${tab === 'info' ? `<div class="kv-grid">${[['商机名称', o.name], ['客户', accountName(o.accountId)], ['阶段', o.stage], ['预计金额', money(o.amount)], ['成交概率', `${Number(o.probability || 0)}%`], ['负责人', o.owner], ['预计成交日', fmtDate(o.expectedDate)], ['创建时间', fmtDateTime(o.createdAt)]].map(([k, v]) => `<div class="kv"><span>${k}</span><b>${esc(v || '—')}</b></div>`).join('')}<div class="kv wide"><span>备注</span><b>${esc(o.notes || '—')}</b></div></div>`
+      <div class="tabs">${[['info', '基本信息'], ['activities', `跟进记录 ${ov?.activities.length || 0}`], ['contracts', `相关合同 ${contracts.length}`], ['files', '相关文件']].map(([k, l]) => `<button class="tab ${k === tab ? 'on' : ''}" data-act="opp-tab" data-tab="${k}">${l}</button>`).join('')}</div>
+      <div class="tab-pane">${tab === 'info' ? `<div class="kv-grid">${[['商机名称', o.name], ['客户', accountName(o.accountId)], ['阶段', o.stage], ['预计金额', money(o.amount)], ['成交概率', `${Number(o.probability || 0)}%`], ['负责人', o.owner], ['预计成交日', fmtDate(o.expectedDate)], ['创建时间', fmtDateTime(o.createdAt)]].map(([k, v]) => `<div class="kv"><span>${k}</span><b>${esc(v || '—')}</b></div>`).join('')}${customKv('opportunities', o)}<div class="kv wide"><span>备注</span><b>${esc(o.notes || '—')}</b></div></div>`
         : tab === 'activities' ? `<div class="sub-head">${canEdit() ? `<button class="btn light small" data-act="create" data-type="activities" data-account="${esc(o.accountId)}">${icon('plus')}写跟进</button>` : ''}</div>${table('activities', LISTS.activities.cols.filter(c => c[0] !== 'accountId'), ov?.activities || [])}`
+        : tab === 'files' ? await filesPane('opportunities', id)
         : table('contracts', LISTS.contracts.cols.filter(c => c[0] !== 'accountId'), contracts)}</div>
     </section>`;
 }
@@ -831,23 +918,32 @@ async function viewContract(id) {
   const [{ items: pays }, { items: plans }] = await Promise.all([API.get(`/payments?contractId=${id}`), API.get(`/plans?contractId=${id}`)]);
   const got = pays.reduce((a, p) => a + Number(p.amount), 0);
   const ratio = c.amount ? Math.min(100, Math.round((got / c.amount) * 100)) : 0;
+  const files = await filesPane('contracts', id);
+  const levels = c.approvalLevels || [];
+  const ACTION = { submit: '提交审批', approve: '通过', reject: '驳回', withdraw: '撤回' };
+  const approvalHtml = levels.length || (c.approvalHistory || []).length ? `<h4 class="sec">审批流程</h4>
+    ${levels.length ? `<ol class="steps small">${levels.map((l, i) => `<li class="${c.status === '审批中' ? (i < c.approvalStep ? 'done' : i === c.approvalStep ? 'cur' : '') : ['已签订', '执行中', '已完成'].includes(c.status) ? 'done' : ''}"><span>${i + 1}</span>${esc(l.name)}</li>`).join('')}</ol>` : ''}
+    <ul class="timeline">${(c.approvalHistory || []).slice().reverse().map(h => `<li class="${h.action}"><b>${esc(h.byName)}</b> ${ACTION[h.action] || h.action}${h.level ? `（${esc(h.level)}）` : ''}<small>${fmtDateTime(h.at)}</small>${h.note ? `<p>${esc(h.note)}</p>` : ''}</li>`).join('')}</ul>` : '';
   openModal({
     title: `合同 ${c.number || ''}`, wide: true, readOnly: true,
     body: `<div class="kv-grid">${[['合同名称', c.name], ['客户', accountName(c.accountId)], ['关联商机', R.opportunities.get(c.opportunityId)?.name], ['合同金额', money(c.amount)], ['状态', c.status], ['签订日期', fmtDate(c.signedAt)], ['合同期限', c.startDate || c.endDate ? `${fmtDate(c.startDate)} ~ ${fmtDate(c.endDate)}` : ''], ['负责人', c.owner]].map(([k, v]) => `<div class="kv"><span>${k}</span><b>${esc(v || '—')}</b></div>`).join('')}
-      ${c.approvalNote ? `<div class="kv wide"><span>审批意见</span><b>${esc(c.approvalNote)}</b></div>` : ''}<div class="kv wide"><span>备注</span><b>${esc(c.notes || '—')}</b></div></div>
+      ${customKv('contracts', c)}<div class="kv wide"><span>备注</span><b>${esc(c.notes || '—')}</b></div></div>${approvalHtml}
       <h4 class="sec">回款进度 <span class="muted small">已收 ${money(got)} / 应收 ${money(c.amount)}（${ratio}%）</span></h4><progress max="100" value="${ratio}"></progress>
       ${pays.length ? `<table class="mini"><thead><tr><th>到账日期</th><th>金额</th><th>方式</th><th>备注</th></tr></thead><tbody>${pays.map(p => `<tr><td>${fmtDate(p.paidAt)}</td><td>${money(p.amount)}</td><td>${esc(p.method)}</td><td>${esc(p.notes || '')}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">暂无回款记录</p>'}
-      ${plans.length ? `<h4 class="sec">回款计划</h4><table class="mini"><thead><tr><th>计划日期</th><th>金额</th><th>状态</th></tr></thead><tbody>${plans.map(p => `<tr><td>${fmtDate(p.dueDate)}</td><td>${money(p.amount)}</td><td>${cell('plans', ['status', '', 'planStatus'], p)}</td></tr>`).join('')}</tbody></table>` : ''}`,
-    footer: canEdit() ? `${c.status !== '已作废' && got < c.amount ? `<button type="button" class="btn light" data-act="pay-contract" data-id="${esc(id)}">登记回款</button>` : ''}<button type="button" class="btn light" data-act="edit" data-type="contracts" data-id="${esc(id)}">编辑</button>` : '',
+      ${plans.length ? `<h4 class="sec">回款计划</h4><table class="mini"><thead><tr><th>计划日期</th><th>金额</th><th>状态</th></tr></thead><tbody>${plans.map(p => `<tr><td>${fmtDate(p.dueDate)}</td><td>${money(p.amount)}</td><td>${cell('plans', ['status', '', 'planStatus'], p)}</td></tr>`).join('')}</tbody></table>` : ''}
+      <h4 class="sec">相关文件</h4>${files}`,
+    footer: canEdit() ? `${c.status !== '已作废' && got < c.amount ? `<button type="button" class="btn light" data-act="pay-contract" data-id="${esc(id)}">登记回款</button>` : ''}${canApproveC(c) ? `<button type="button" class="btn" data-act="approve-contract" data-id="${esc(id)}">审批</button>` : ''}<button type="button" class="btn light" data-act="edit" data-type="contracts" data-id="${esc(id)}">编辑</button>` : '',
   });
 }
-function approveModal(id) {
-  const c = R.contracts.get(id);
+async function approveModal(id) {
+  const { item: c } = await API.get(`/contracts/${id}`);
+  const levels = c.approvalLevels || [], lv = curLevel(c);
   openModal({
-    title: '合同审批', submitText: '审批通过',
-    body: `<p>合同：<b>${esc(contractLabel(id))}</b>　金额：<b>${money(c?.amount)}</b>　客户：<b>${esc(accountName(c?.accountId))}</b></p><label class="fld wide"><span>审批意见</span><textarea class="field" name="note" maxlength="500" placeholder="可选"></textarea></label>`,
+    title: `合同审批${lv ? ' · ' + lv.name : ''}`, submitText: '审批通过',
+    body: `<p>合同：<b>${esc(contractLabel(id))}</b>　金额：<b>${money(c?.amount)}</b>　客户：<b>${esc(accountName(c?.accountId))}</b></p>
+      ${levels.length > 1 ? `<p class="muted small">共 ${levels.length} 级审批：${levels.map((l, i) => i === c.approvalStep ? `<b>${esc(l.name)}（当前）</b>` : esc(l.name)).join(' → ')}</p>` : ''}<label class="fld wide"><span>审批意见</span><textarea class="field" name="note" maxlength="500" placeholder="可选"></textarea></label>`,
     footer: '<button type="button" class="btn light danger" data-act="reject-contract">驳回</button>',
-    onSubmit: async fd => { await API.post(`/contracts/${id}/approve`, { approved: true, note: fd.get('note') }); toast('审批通过，合同已签订'); rerender(); },
+    onSubmit: async fd => { const r = await API.post(`/contracts/${id}/approve`, { approved: true, note: fd.get('note') }); toast(r.pending ? `已通过，流转至「${r.pending.name}」` : '审批通过，合同已签订'); rerender(); },
   }).dataset.contract = id;
 }
 
@@ -863,14 +959,39 @@ async function pageFinance() {
       <div class="kpi red"><span class="kpi-ic">${icon('alert')}</span><div><div class="kpi-l">欠款金额</div><div class="kpi-v">${money(t.outstanding)}</div><div class="kpi-c muted">应收 - 已收</div></div></div>
       <div class="kpi orange"><span class="kpi-ic">${icon('calendar')}</span><div><div class="kpi-l">逾期计划</div><div class="kpi-v">${money(t.overdue)}</div><div class="kpi-c muted">计划日期已过且未回款</div></div></div>
     </div>
-    <section class="panel"><div class="tabs">${[['payments', '回款记录'], ['plans', '回款计划'], ['receivables', '应收账款']].map(([k, l]) => `<button class="tab ${k === tab ? 'on' : ''}" data-act="finance-tab" data-tab="${k}">${l}</button>`).join('')}</div><div id="financeBody"></div></section>`;
+    <section class="panel"><div class="tabs">${[['payments', '回款记录'], ['plans', '回款计划'], ['receivables', '应收账款'], ['statements', '对账单']].map(([k, l]) => `<button class="tab ${k === tab ? 'on' : ''}" data-act="finance-tab" data-tab="${k}">${l}</button>`).join('')}</div><div id="financeBody"></div></section>`;
   const body = $('#financeBody');
+  if (tab === 'statements') { ui.list = null; return renderStatement(body); }
   if (tab === 'receivables') {
     ui.list = null;
     body.innerHTML = f.contracts.length ? `<div class="tbl-wrap"><table><thead><tr><th>合同编号</th><th>合同名称</th><th>客户</th><th>合同金额</th><th>已收</th><th>未收</th><th>回款进度</th><th>状态</th><th class="ops">操作</th></tr></thead><tbody>
       ${f.contracts.map(c => `<tr><td><b>${esc(c.number)}</b></td><td>${esc(c.name)}</td><td><a class="link" href="#/accounts/${esc(c.accountId)}">${esc(c.accountName)}</a></td><td>${money(c.amount)}</td><td>${money(c.received)}</td><td class="${c.outstanding > 0 ? 'neg' : ''}">${money(c.outstanding)}</td><td><progress max="100" value="${c.amount ? Math.round((c.received / c.amount) * 100) : 0}"></progress></td><td>${tag(c.status)}</td><td class="ops"><div class="row-actions"><button class="textbtn" data-act="view-contract" data-id="${esc(c.id)}">查看</button>${canEdit() && c.outstanding > 0 ? `<button class="textbtn" data-act="pay-contract" data-id="${esc(c.id)}">登记回款</button>` : ''}</div></td></tr>`).join('')}
       </tbody></table></div>` : `<div class="empty">${icon('file')}<p>暂无合同</p></div>`;
   } else await mountList(body, tab);
+}
+
+async function renderStatement(body) {
+  const st = ui.tabs.stmt ||= { accountId: '', from: `${new Date().getFullYear()}-01-01`, to: ymd() };
+  const q = new URLSearchParams({ from: st.from, to: st.to }); if (st.accountId) q.set('accountId', st.accountId);
+  const r = await API.get('/statements?' + q);
+  const s0 = r.summary[0];
+  body.innerHTML = `<div class="toolbar"><div class="filters">
+      <label class="filter"><span>客户</span><select class="field slim" id="stAccount">${optionList('account', st.accountId, '全部客户（汇总）')}</select></label>
+      <label class="range"><input class="field slim" type="date" id="stFrom" value="${st.from}"> ~ <input class="field slim" type="date" id="stTo" value="${st.to}"></label>
+      <button class="btn light" data-act="stmt-query">查询</button></div>
+      <div class="tools">${canEdit() ? `<button class="btn light" data-act="stmt-export">${icon('download')}导出</button>` : ''}<button class="btn light" data-act="print">${icon('print')}打印</button></div></div>
+    <div class="statement">
+      <h3 class="center">${esc(settings.companyName)} · ${st.accountId ? esc(s0?.accountName || '') + ' 往来对账单' : '客户往来对账汇总'}</h3>
+      <p class="center muted">对账期间：${r.from} 至 ${r.to}　　单位：元</p>
+      ${st.accountId ? `<div class="tbl-wrap plain"><table><thead><tr><th>日期</th><th>类型</th><th>单据</th><th class="num">应收增加</th><th class="num">回款</th><th class="num">余额</th></tr></thead><tbody>
+        <tr class="sum"><td>${r.from}</td><td>期初余额</td><td></td><td></td><td></td><td class="num">${money(s0.opening)}</td></tr>
+        ${r.lines.map(l => `<tr><td>${l.date}</td><td>${l.kind}</td><td>${esc(l.ref)}</td><td class="num">${l.debit ? money(l.debit) : ''}</td><td class="num">${l.credit ? money(l.credit) : ''}</td><td class="num">${money(l.balance)}</td></tr>`).join('')}
+        <tr class="sum"><td>${r.to}</td><td>本期合计 / 期末余额</td><td></td><td class="num">${money(s0.debit)}</td><td class="num">${money(s0.credit)}</td><td class="num"><b>${money(s0.closing)}</b></td></tr>
+      </tbody></table></div><div class="sign"><span>客户确认（盖章）：</span><span>${esc(settings.companyName)}（盖章）：</span></div>`
+      : `<div class="tbl-wrap plain"><table><thead><tr><th>客户</th><th class="num">期初余额</th><th class="num">本期应收</th><th class="num">本期回款</th><th class="num">期末余额</th><th class="ops"></th></tr></thead><tbody>
+        ${r.summary.map(x => `<tr><td><b>${esc(x.accountName)}</b></td><td class="num">${money(x.opening)}</td><td class="num">${money(x.debit)}</td><td class="num">${money(x.credit)}</td><td class="num ${x.closing > 0 ? 'neg' : ''}">${money(x.closing)}</td><td class="ops"><button class="textbtn" data-act="stmt-account" data-id="${esc(x.accountId)}">明细</button></td></tr>`).join('') || '<tr><td colspan="6" class="center muted">期间内无往来</td></tr>'}
+        <tr class="sum"><td>合计</td><td class="num">${money(r.totals.opening)}</td><td class="num">${money(r.totals.debit)}</td><td class="num">${money(r.totals.credit)}</td><td class="num">${money(r.totals.closing)}</td><td></td></tr></tbody></table></div>`}
+      <p class="muted small">口径：应收 = 已生效合同金额（按签订日期），回款按到账日期；不含草稿与作废合同。</p></div>`;
 }
 
 // ======================= 任务 =======================
@@ -945,19 +1066,45 @@ function userModal(u = null) {
 // ======================= 系统设置 =======================
 const DICT_LABEL = { leadSources: '线索/客户来源', accountTypes: '客户类型', accountLevels: '客户级别', accountStatus: '客户状态', industries: '行业', activityTypes: '跟进方式', activityResults: '跟进结果', paymentMethods: '付款方式', departments: '部门' };
 async function pageSettings() {
-  const tabs = isAdmin() ? [['basic', '基础设置'], ['dicts', '数据字典'], ['fields', '字段管理'], ['audits', '审计日志'], ['about', '安全与运维']] : [['audits', '审计日志'], ['fields', '字段管理'], ['about', '安全与运维']];
+  const tabs = isAdmin() ? [['basic', '基础设置'], ['dicts', '数据字典'], ['fields', '字段管理'], ['approval', '审批与通知'], ['audits', '审计日志'], ['about', '安全与运维']] : [['audits', '审计日志'], ['fields', '字段管理'], ['about', '安全与运维']];
   let tab = ui.tabs.settings; if (!tabs.some(t => t[0] === tab)) tab = tabs[0][0];
   ui.tabs.settings = tab;
   let pane = '';
   if (tab === 'basic') {
     pane = `<form id="basicForm" class="settings-form"><label class="fld"><span>系统名称</span><input class="field" name="systemName" maxlength="60" value="${esc(settings.systemName)}"></label>
       <label class="fld"><span>公司名称</span><input class="field" name="companyName" maxlength="60" value="${esc(settings.companyName)}"></label>
-      <div class="fld"><span>系统 Logo</span><div class="logo-preview"><span class="logo">N</span><small class="muted">Logo 上传将在附件存储上线后提供</small></div></div>
+      <div class="fld"><span>系统 Logo</span><div class="logo-preview">${settings.logo ? `<img class="logo img" src="/api/settings/logo?v=${Date.now()}" alt="">` : '<span class="logo">N</span>'}
+        <label class="btn light small">${icon('upload')}上传<input type="file" hidden accept="image/png,image/jpeg,image/webp" data-act-change="logo"></label>${settings.logo ? '<button type="button" class="btn light small danger" data-act="logo-del">移除</button>' : ''}<small class="muted">PNG/JPG/WebP，≤512KB，建议正方形</small></div></div>
       <div><button class="btn" type="submit">保存</button></div></form>`;
   } else if (tab === 'dicts') {
     pane = `<form id="dictForm"><p class="muted">每行一个选项；修改后新建/编辑表单立即生效，历史数据保留原值。</p><div class="dict-grid">${Object.entries(DICT_LABEL).map(([k, l]) => `<label class="fld"><span>${l}</span><textarea class="field" name="${k}" rows="6">${esc(dict(k).join('\n'))}</textarea></label>`).join('')}</div><div><button class="btn" type="submit">保存字典</button></div></form>`;
+  } else if (tab === 'approval') {
+    const ap = ui.apDraft ||= structuredClone(settings.approval.levels);
+    const w = settings.webhook || {};
+    pane = `<form id="approvalForm"><h4>合同审批级别</h4><p class="muted small">合同金额 ≥ 阈值的级别都需要依次审批；管理员可审批任意级别，提交人不能审批自己的合同。</p>
+      <div class="tbl-wrap plain"><table class="mini edit"><thead><tr><th>顺序</th><th>级别名称</th><th>审批角色</th><th>金额阈值（元，≥）</th><th></th></tr></thead><tbody>
+      ${ap.map((l, i) => `<tr><td>${i + 1}</td><td><input class="field slim" data-ap="${i}" data-prop="name" value="${esc(l.name)}" maxlength="30"></td><td><select class="field slim" data-ap="${i}" data-prop="role"><option value="manager" ${l.role === 'manager' ? 'selected' : ''}>销售经理</option><option value="admin" ${l.role === 'admin' ? 'selected' : ''}>管理员</option></select></td><td><input class="field slim" type="number" min="0" step="0.01" data-ap="${i}" data-prop="minAmount" value="${l.minAmount}"></td><td>${ap.length > 1 ? `<button type="button" class="textbtn danger" data-act="ap-del" data-i="${i}">删除</button>` : ''}</td></tr>`).join('')}</tbody></table></div>
+      <div class="tools">${ap.length < 5 ? '<button type="button" class="btn light small" data-act="ap-add">新增级别</button>' : ''}<button class="btn" type="submit">保存审批设置</button></div></form>
+      <form id="webhookForm" class="settings-form"><h4 class="sec">群机器人通知</h4>
+        <label class="fld"><span>类型</span><select class="field" name="kind">${[['wecom', '企业微信群机器人'], ['dingtalk', '钉钉群机器人'], ['generic', '通用 JSON']].map(([k, l]) => `<option value="${k}" ${w.kind === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+        <label class="fld"><span>Webhook 地址（https）</span><input class="field" name="url" value="${esc(w.url || '')}" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…"></label>
+        <div class="fld"><span>推送事件</span><div class="checks">${[['approval', '合同审批（待审批/结果）'], ['assign', '分配负责人']].map(([k, l]) => `<label class="check"><input type="checkbox" name="events" value="${k}" ${(w.events || []).includes(k) ? 'checked' : ''}> ${l}</label>`).join('')}</div></div>
+        <div class="tools"><button class="btn" type="submit">保存通知设置</button>${w.url ? '<button type="button" class="btn light" data-act="webhook-test">发送测试消息</button>' : ''}</div>
+        <p class="muted small">钉钉机器人如开启“加签”，请改用“自定义关键词”安全设置（关键词可填系统名称）。站内通知无需配置，顶部铃铛即可查看。</p></form>`;
   } else if (tab === 'fields') {
-    pane = `<p class="muted">系统内置字段如下。自定义字段（新增/隐藏/排序）计划在后续版本提供。</p>${Object.entries(FORMS).map(([type, fields]) => `<h4 class="sec">${ENTITY_LABEL[type]}</h4><div class="tbl-wrap plain"><table class="mini"><thead><tr><th>字段名</th><th>字段键</th><th>类型</th><th>必填</th><th>状态</th></tr></thead><tbody>${fields.map(([k, l, kind = 'text', req]) => `<tr><td>${esc(l.replace(/（.*?）/, ''))}</td><td><code>${k}</code></td><td>${Array.isArray(kind) ? '下拉' : String(kind).startsWith('dict:') ? '下拉（字典）' : { text: '文本', textarea: '多行文本', money: '金额', percent: '百分比', date: '日期', datetime: '日期时间', account: '关联客户', contract: '关联合同', opportunity: '关联商机', user: '成员', checkbox: '开关', tel: '电话', email: '邮箱', contractStatus: '下拉' }[kind] || kind}</td><td>${req ? '是' : '否'}</td><td><span class="dot on"></span>启用</td></tr>`).join('')}</tbody></table></div>`).join('')}`;
+    const CF_ENT = ['leads', 'accounts', 'contacts', 'opportunities', 'contracts'];
+    const cf = ui.cfDraft ||= structuredClone(settings.customFields || {});
+    const typeOpts = v => [['text', '单行文本'], ['textarea', '多行文本'], ['number', '数字'], ['date', '日期'], ['select', '下拉选项']].map(([k, l]) => `<option value="${k}" ${v === k ? 'selected' : ''}>${l}</option>`).join('');
+    pane = (isAdmin() ? `<form id="cfForm"><h4>自定义字段</h4><p class="muted small">新增字段会出现在新建/编辑表单、详情、CSV 导出与导入模板中；勾选“列表显示”后在列表中显示。删除字段不会删除历史数据。</p>
+      ${CF_ENT.map(ent => `<div class="cf-block"><div class="panel-head"><b>${ENTITY_LABEL[ent]}</b><button type="button" class="btn light small" data-act="cf-add" data-ent="${ent}">${icon('plus')}新增字段</button></div>
+        ${(cf[ent] || []).length ? `<div class="tbl-wrap plain"><table class="mini edit"><thead><tr><th>字段名称</th><th>类型</th><th>下拉选项（逗号分隔）</th><th>必填</th><th>列表显示</th><th></th></tr></thead><tbody>${cf[ent].map((f, i) => `<tr>
+          <td><input class="field slim" data-cf="${ent}" data-i="${i}" data-prop="label" value="${esc(f.label)}" maxlength="30" placeholder="如：统一社会信用代码"></td>
+          <td><select class="field slim" data-cf="${ent}" data-i="${i}" data-prop="type">${typeOpts(f.type)}</select></td>
+          <td><input class="field slim" data-cf="${ent}" data-i="${i}" data-prop="options" value="${esc((f.options || []).join(','))}" ${f.type === 'select' ? '' : 'disabled'}></td>
+          <td><input type="checkbox" data-cf="${ent}" data-i="${i}" data-prop="required" ${f.required ? 'checked' : ''}></td>
+          <td><input type="checkbox" data-cf="${ent}" data-i="${i}" data-prop="inList" ${f.inList ? 'checked' : ''}></td>
+          <td><button type="button" class="textbtn danger" data-act="cf-del" data-ent="${ent}" data-i="${i}">删除</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="muted small">暂无自定义字段</p>'}</div>`).join('')}
+      <div class="tools"><button class="btn" type="submit">保存字段配置</button><button type="button" class="btn light" data-act="cf-reset">放弃修改</button></div></form><h4 class="sec">内置字段</h4>` : '') + `<p class="muted">系统内置字段如下。</p>${Object.entries(FORMS).map(([type, fields]) => `<h4 class="sec">${ENTITY_LABEL[type]}</h4><div class="tbl-wrap plain"><table class="mini"><thead><tr><th>字段名</th><th>字段键</th><th>类型</th><th>必填</th><th>状态</th></tr></thead><tbody>${fields.map(([k, l, kind = 'text', req]) => `<tr><td>${esc(l.replace(/（.*?）/, ''))}</td><td><code>${k}</code></td><td>${Array.isArray(kind) ? '下拉' : String(kind).startsWith('dict:') ? '下拉（字典）' : { text: '文本', textarea: '多行文本', money: '金额', percent: '百分比', date: '日期', datetime: '日期时间', account: '关联客户', contract: '关联合同', opportunity: '关联商机', user: '成员', checkbox: '开关', tel: '电话', email: '邮箱', contractStatus: '下拉' }[kind] || kind}</td><td>${req ? '是' : '否'}</td><td><span class="dot on"></span>启用</td></tr>`).join('')}</tbody></table></div>`).join('')}`;
   } else if (tab === 'audits') {
     const { items } = await API.get('/audits');
     pane = items.length ? `<div class="tbl-wrap plain"><table><thead><tr><th>时间</th><th>操作人</th><th>行为</th><th>对象</th><th>记录编号</th></tr></thead><tbody>${items.map(x => `<tr><td>${fmtDateTime(x.at)}</td><td>${esc(x.user_name || '—')}</td><td>${tag(ACTION_LABEL[x.action] || x.action)}</td><td>${esc(ENTITY_LABEL[x.entity] || x.entity)}</td><td><code>${esc(x.entity_id.slice(0, 8))}</code></td></tr>`).join('')}</tbody></table></div><p class="muted small">显示最近 300 条。</p>` : '<div class="empty">暂无审计日志</div>';
@@ -969,6 +1116,19 @@ async function pageSettings() {
       ${bk.items.length ? `<div class="tbl-wrap plain"><table class="mini"><thead><tr><th>快照文件</th><th>大小</th><th>时间</th></tr></thead><tbody>${bk.items.map(b => `<tr><td><code>${esc(b.name)}</code></td><td>${(b.size / 1024).toFixed(0)} KB</td><td>${fmtDateTime(b.createdAt)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">暂无备份</p>'}<h4 class="sec">安全配置</h4>` : '') + `<div class="kv-grid">${[['系统版本', 'V' + h.version], ['数据存储', 'SQLite（WAL）'], ['会话有效期', '8 小时，HttpOnly + SameSite Cookie'], ['密码策略', '≥12 位，scrypt 加盐散列'], ['登录保护', '同账号 15 分钟内失败 5 次锁定'], ['数据权限', '按成员“数据范围”控制（本人/本部门/全部）'], ['金额存储', '整数“分”，避免浮点误差']].map(([k, v]) => `<div class="kv"><span>${k}</span><b>${esc(v)}</b></div>`).join('')}</div>`;
   }
   $('#content').innerHTML = pageHead('系统设置', '基础设置、数据字典、字段与审计日志') + `<section class="panel settings"><div class="tabs">${tabs.map(([k, l]) => `<button class="tab ${k === tab ? 'on' : ''}" data-act="settings-tab" data-tab="${k}">${l}</button>`).join('')}</div><div class="tab-pane">${pane}</div></section>`;
+  $('#cfForm')?.addEventListener('submit', async e => {
+    e.preventDefault();
+    try { settings = (await API.put('/settings', { customFields: ui.cfDraft })).settings; ui.cfDraft = null; toast('字段配置已保存'); rerender(); } catch (err) { toast(err.message, true); }
+  });
+  $('#approvalForm')?.addEventListener('submit', async e => {
+    e.preventDefault();
+    try { settings = (await API.put('/settings', { approval: { levels: ui.apDraft } })).settings; ui.apDraft = null; toast('审批设置已保存'); rerender(); } catch (err) { toast(err.message, true); }
+  });
+  $('#webhookForm')?.addEventListener('submit', async e => {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    try { settings = (await API.put('/settings', { webhook: { url: fd.get('url'), kind: fd.get('kind'), events: fd.getAll('events') } })).settings; toast('通知设置已保存'); rerender(); } catch (err) { toast(err.message, true); }
+  });
   $('#basicForm')?.addEventListener('submit', async e => {
     e.preventDefault();
     try { settings = (await API.put('/settings', Object.fromEntries(new FormData(e.currentTarget)))).settings; toast('设置已保存'); $('#shell')?.remove(); rerender(); } catch (err) { toast(err.message, true); }
@@ -1051,6 +1211,25 @@ const ACTIONS = {
   'report-query': () => { ui.tabs.reports = { from: $('#rFrom').value, to: $('#rTo').value }; rerender(); },
   'report-export': () => { location.href = `/api/reports?from=${encodeURIComponent($('#rFrom').value)}&to=${encodeURIComponent($('#rTo').value)}&format=csv`; },
   'user-create': () => userModal(),
+  notif: () => openNotifications(),
+  import: t => importModal(t.dataset.type),
+  'file-del': async t => {
+    if (!await confirmBox('确认删除该文件？')) return;
+    const box = t.closest('.files');
+    await API.del(`/attachments/${t.dataset.id}`); toast('已删除');
+    box.outerHTML = await filesPane(box.dataset.entity, box.dataset.id);
+  },
+  'logo-del': async () => { settings = (await API.del('/settings/logo')).settings; toast('已移除 Logo'); $('#shell')?.remove(); rerender(); },
+  'stmt-query': () => { ui.tabs.stmt = { accountId: $('#stAccount').value, from: $('#stFrom').value, to: $('#stTo').value }; renderStatement($('#financeBody')).catch(e => toast(e.message, true)); },
+  'stmt-account': t => { ui.tabs.stmt.accountId = t.dataset.id; renderStatement($('#financeBody')).catch(e => toast(e.message, true)); },
+  'stmt-export': () => { const st = ui.tabs.stmt; location.href = `/api/statements?${new URLSearchParams({ from: st.from, to: st.to, ...(st.accountId ? { accountId: st.accountId } : {}), format: 'csv' })}`; },
+  print: () => window.print(),
+  'cf-add': t => { (ui.cfDraft[t.dataset.ent] ||= []).push({ label: '', type: 'text', options: [], required: false, inList: false }); pageSettings(); },
+  'cf-del': t => { ui.cfDraft[t.dataset.ent].splice(Number(t.dataset.i), 1); pageSettings(); },
+  'cf-reset': () => { ui.cfDraft = null; pageSettings(); },
+  'ap-add': () => { ui.apDraft.push({ name: '总经理审批', role: 'admin', minAmount: 100000 }); pageSettings(); },
+  'ap-del': t => { ui.apDraft.splice(Number(t.dataset.i), 1); pageSettings(); },
+  'webhook-test': async () => { await API.post('/settings/webhook-test'); toast('测试消息已发送，请在群内查看'); },
   'backup-now': async () => { const r = await API.post('/backups'); toast('已生成备份 ' + r.name); rerender(); },
   'user-edit': t => userModal(R.users.find(u => u.id === t.dataset.id)),
   'user-toggle': async t => {
@@ -1072,10 +1251,26 @@ document.addEventListener('change', e => {
   const L = ui.list;
   if (t.dataset.actChange === 'filter') { L.filters[t.dataset.key] = t.value; L.page = 1; L.selected.clear(); loadList().catch(err => toast(err.message, true)); }
   if (t.dataset.actChange === 'page-size') { L.pageSize = Number(t.value); L.page = 1; loadList().catch(err => toast(err.message, true)); }
+  if (t.dataset.actChange === 'upload') uploadFiles(t).catch(err => toast(err.message, true));
+  if (t.dataset.actChange === 'logo') {
+    const f = t.files[0]; if (!f) return;
+    fetch('/api/settings/logo', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': f.type }, body: f })
+      .then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d.error); settings = d.settings; settings.logoV = Date.now(); toast('Logo 已更新'); $('#shell')?.remove(); rerender(); })
+      .catch(err => toast(err.message, true));
+  }
+  if (t.dataset.cf !== undefined || t.dataset.ap !== undefined) syncDraft(t);
   if (t.dataset.actChange === 'opp-owner') go('#/opportunities' + (t.value ? '?owner=' + encodeURIComponent(t.value) : ''));
 });
 const onListSearch = debounce(v => { const L = ui.list; if (!L) return; L.q = v.trim(); L.page = 1; L.selected.clear(); loadList().catch(err => toast(err.message, true)); }, 300);
-document.addEventListener('input', e => { if (e.target.dataset.actInput === 'list-q') onListSearch(e.target.value); });
+document.addEventListener('input', e => { if (e.target.dataset.actInput === 'list-q') onListSearch(e.target.value); if (e.target.dataset.cf !== undefined || e.target.dataset.ap !== undefined) syncDraft(e.target); });
+/** 设置页可编辑表格 → 草稿对象 */
+function syncDraft(el) {
+  const prop = el.dataset.prop, v = el.type === 'checkbox' ? el.checked : el.value;
+  if (el.dataset.ap !== undefined) { ui.apDraft[Number(el.dataset.ap)][prop] = prop === 'minAmount' ? Number(v || 0) : v; return; }
+  const f = ui.cfDraft[el.dataset.cf][Number(el.dataset.i)];
+  f[prop] = prop === 'options' ? String(v).split(/[,，\n]/).map(x => x.trim()).filter(Boolean) : v;
+  if (prop === 'type') { const opt = el.closest('tr').querySelector('[data-prop=options]'); opt.disabled = v !== 'select'; }
+}
 document.addEventListener('keydown', e => { if (e.key === 'Escape') document.body.classList.remove('nav-open'); });
 
 // ======================= 启动 =======================
