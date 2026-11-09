@@ -6,6 +6,7 @@ services:
       - "127.0.0.1:3100:3100"
     environment:
       PORT: 3100
+      TZ: ${TZ:-Asia/Shanghai}
       DATA_DIR: /app/data
       CRM_ADMIN_EMAIL: ${CRM_ADMIN_EMAIL:-admin@local.crm}
       CRM_ADMIN_PASSWORD: ${CRM_ADMIN_PASSWORD:?请在 .env 配置强密码}

@@ -1,5 +1,5 @@
 FROM node:22-bookworm-slim
-ENV NODE_ENV=production PORT=3100 DATA_DIR=/app/data
+ENV NODE_ENV=production PORT=3100 DATA_DIR=/app/data TZ=Asia/Shanghai
 WORKDIR /app
 COPY package.json server.js ./
 COPY public/ ./public/

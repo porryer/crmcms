@@ -1,4 +1,8 @@
-# NovaCRM V1.0 · 可离线运行的 Web CRM
+# NovaCRM V1.1 · 可离线运行的 Web CRM
+
+> V1.1：对照原型完成代码审查与功能补全，详见 [docs/REVIEW_V1.1.md](docs/REVIEW_V1.1.md)（问题清单、补全清单、验证结果与下一步建议）。
+
+![工作台](docs/screenshots/01-dashboard.png)
 
 > 交付性质：**独立 CRM 功能 V1.0**。原演示视频在当前运行环境中无法读取，故**未取得录屏 1:1 复刻验收**。UI 与视频的差异尚不可量化。
 
@@ -30,6 +34,8 @@ docker compose logs crm
 
 ## 模块及实现边界
 
+> 以下为 V1.0 原始说明；V1.1 新增的工作台趋势/漏斗、客户详情、商机看板拖拽与转合同、合同审批、回款计划与应收、数据报表、团队管理、系统设置（字典/审计）、全局搜索、移动端适配等，见 REVIEW_V1.1.md。
+
 - 工作台：实时 KPI、销售漏斗、待办；使用真实数据库数据。
 - 线索：CRUD、关键词搜索、事务化转客户、防重复转换。
 - 客户、联系人、商机、任务、跟进、合同、回款：CRUD（回款仅添加/删除，防止直接修改金额绕开校验）。
@@ -48,6 +54,12 @@ docker compose logs crm
 npm run check
 npm test
 npm run backup
+```
+
+演示数据（仅演示环境）：服务启动后执行
+
+```bash
+CRM_URL=http://localhost:3100 CRM_PASSWORD=你的管理员密码 npm run seed
 ```
 
 `npm test` 自动启动隔离数据库和服务，检查登录、线索转客户、客户/合同/回款、金额约束、权限、会话、CSV、页面可达与审计。端到端浏览器视觉复验尚未覆盖。
