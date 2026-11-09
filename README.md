@@ -1,91 +1,83 @@
-# NovaCRM V1.6 · 可离线运行的 Web CRM
+# NovaCRM · 可离线运行的 Web CRM
 
-> V1.6：企业微信/钉钉个人工作通知、通知链接登录后直达、安全自查修复（见 REVIEW 第八、九节）。
->
-> V1.5：钉钉客户端内免登（工作台打开自动登录）。
->
-> V1.4：企业微信 / 钉钉扫码登录（含企业微信客户端内免登、个人菜单自助绑定），见 REVIEW 第七节。
->
-> V1.3：附件纳入备份、Excel 导入导出、邮件通知、两步验证二维码、OIDC 单点登录，见 REVIEW 第六节。
->
-> V1.2：数据权限、整数分金额、定时备份、HTTPS 部署、导入/附件/对账/自定义字段/通知/多级审批、两步验证、E2E 与 CI，见 REVIEW 第五节与 [docs/DEPLOY.md](docs/DEPLOY.md)。
->
-> V1.1：对照原型完成代码审查与功能补全，详见 [docs/REVIEW_V1.1.md](docs/REVIEW_V1.1.md)（问题清单、补全清单、验证结果与下一步建议）。
+零依赖（Node.js 22 内置 `node:sqlite`）、严格 CSP、可内网离线部署的客户关系管理系统。当前版本 **1.6.x**。
 
 ![工作台](docs/screenshots/01-dashboard.png)
 
-> 交付性质：**独立 CRM 功能 V1.0**。原演示视频在当前运行环境中无法读取，故**未取得录屏 1:1 复刻验收**。UI 与视频的差异尚不可量化。
+## 版本记录
+
+| 版本 | 内容 | 详细说明 |
+|---|---|---|
+| V1.6 | 企业微信 / 钉钉个人工作通知、通知链接登录后直达原页面、安全自查修复；SMTP 加密通道测试 | REVIEW 第八、九节 |
+| V1.5 | 钉钉客户端内免登 | REVIEW 第七节 |
+| V1.4 | 企业微信 / 钉钉扫码登录、客户端内免登、个人菜单自助绑定 | REVIEW 第七节 |
+| V1.3 | 附件纳入备份、Excel 导入导出、邮件通知、两步验证二维码、OIDC 单点登录 | REVIEW 第六节 |
+| V1.2 | 行级数据权限、整数分金额、定时备份、HTTPS 部署、导入 / 附件 / 对账 / 自定义字段 / 通知 / 多级审批、两步验证、E2E 与 CI | REVIEW 第五节 |
+| V1.1 | 对照原型的代码审查与功能补全 | REVIEW 第一至四节 |
+
+审查报告与各版本明细：[docs/REVIEW_V1.1.md](docs/REVIEW_V1.1.md)；部署运维：[docs/DEPLOY.md](docs/DEPLOY.md)；第三方组件：[docs/THIRD_PARTY.md](docs/THIRD_PARTY.md)。
 
 ## 运行条件
 
-- Node.js **22.13+**（自带实验性 `node:sqlite`）；Windows 11 / macOS / Linux 均可。
-- 不需要 `npm install`、第三方 CDN 或 PostgreSQL。
-- 首次运行：
+- Node.js **22.13+**；Windows / macOS / Linux 均可。
+- 不需要 `npm install`、第三方 CDN 或外部数据库。
 
 ```bash
-cd NovaCRM_V1.0
 node server.js
 ```
 
-打开 <http://localhost:3100>。首次启动终端显示管理员邮箱与**一次性生成**的初始密码。管理员登陆后应立即修改密码。建议生产首次安装时先设置 `CRM_ADMIN_PASSWORD` 环境变量（12 位以上）；程序只在第一次建库时使用该值。
+打开 <http://localhost:3100>。首次启动时终端显示管理员邮箱与**一次性生成**的初始密码，登录后请立即修改。生产环境建议首次安装前设置 `CRM_ADMIN_PASSWORD`（12 位以上，仅在第一次建库时使用）。
 
 ## Docker
 
 ```bash
-cp .env.example .env
-# 修改 .env 为你自己的强密码
-# 本地 Docker Desktop / Linux：
+cp .env.example .env    # 修改为你自己的强密码
 docker compose up -d --build
-# 查看首次启动信息
-docker compose logs crm
+docker compose logs crm # 查看首次启动信息
 ```
 
-默认仅监听宿主机回环地址 `127.0.0.1:3100`。**对外开放需自配 HTTPS 反向代理、设置 COOKIE_SECURE=1 及 PUBLIC_ORIGIN=https://实际域名**。Docker Compose 未自动配置 TLS。
+默认只监听宿主机 `127.0.0.1:3100`。对外开放请使用 `compose.https.yaml`（Caddy 自动证书），见 [docs/DEPLOY.md](docs/DEPLOY.md)。
 
-## 模块及实现边界
+## 功能
 
-> 以下为 V1.0 原始说明；V1.1 新增的工作台趋势/漏斗、客户详情、商机看板拖拽与转合同、合同审批、回款计划与应收、数据报表、团队管理、系统设置（字典/审计）、全局搜索、移动端适配等，见 REVIEW_V1.1.md。
+- **销售业务**：工作台（KPI、趋势、漏斗、待办）、线索（分配、转客户）、客户与客户详情、联系人、商机看板（拖拽变更阶段、转合同）、合同（自动编号、多级审批）、财务回款（回款计划、应收、对账单）、跟进任务、数据报表、全局搜索。
+- **数据**：批量导入（Excel / CSV，逐行预检）、导出 Excel / CSV（防公式注入）、附件（白名单与大小限制）、自定义字段、数据字典。
+- **权限**：角色 `admin` / `manager` / `sales` / `viewer`；按成员设定数据范围（本人 / 本部门 / 全部），作用于列表、详情、统计、搜索、导出、附件、对账与通知；多租户隔离。
+- **登录与安全**：scrypt 密码散列、密码复杂度、登录防爆破（持久化）、TOTP 两步验证（二维码）、OIDC 单点登录、企业微信 / 钉钉扫码与客户端内免登、强制第三方登录；HttpOnly + SameSite 会话、Origin 校验、严格 CSP、审计日志。
+- **通知**：站内通知；邮件（SMTP，SSL / STARTTLS，始终校验证书）；企业微信应用消息 / 钉钉工作通知；群机器人 Webhook；每日待办摘要。
+- **运维**：定时一致性快照（含附件增量文件池）与恢复脚本、JSON 访问日志与请求 ID、健康检查（数据库可写、最近备份时间）、启动时自动幂等迁移。
+- **移动端**：≤900px 抽屉侧栏 + 底部标签栏。
 
-- 工作台：实时 KPI、销售漏斗、待办；使用真实数据库数据。
-- 线索：CRUD、关键词搜索、事务化转客户、防重复转换。
-- 客户、联系人、商机、任务、跟进、合同、回款：CRUD（回款仅添加/删除，防止直接修改金额绕开校验）。
-- 合同回款约束：不允许累计到账超过合同总额，金额最多两位小数。
-- 权限：`admin` 全权限；`manager` 可新增、修改、删除及审计；`sales` 可新增、修改及导出；`viewer` 只读。**同角色下尚未实现精细负责人/部门数据范围权限**。
-- 多租户：所有业务查询按服务端会话 tenant_id 过滤；默认安装创建单租户，尚未提供租户自主注册或管理控制台。
-- 数据：SQLite WAL 文件存储；数据不会随刷新丢失。CSV 导出为 UTF-8 BOM。
-- 审计：写操作记录操作者、时间、实体，编辑保留之前的记录 JSON；仅最近 300 条提供 UI 查看。
-- 后台登录：scrypt 加盐密码散列、随机会话、HttpOnly + SameSite Cookie、8h 有效期、退出注销。
-
-**尚未实现**：视频逐帧精准复刻、SaaS 付费/租户注册、审批工作流、附件上传、微信集成、消息推送、批量导入、复杂自定义字段、AI 跟进生成、生产级限流/防爆破、SSO/MFA、字段级 ACL、分布式架构及正式渗透测试。不得将此 V1.0 描述为大型企业可直接公网运营的商用系统。
-
-## 验收
+## 测试
 
 ```bash
-npm run check
-npm test        # API 集成测试
+npm run check   # 语法检查
+npm test        # API 集成测试（自动启动隔离数据库与服务）
 npm run e2e     # 浏览器端到端测试（需 Playwright + Chromium）
-npm run backup
 ```
 
-演示数据（仅演示环境）：服务启动后执行
+GitHub Actions（`.github/workflows/ci.yml`）在每次推送时运行以上三项并构建 Docker 镜像。
+
+演示数据（仅演示环境，服务启动后执行）：
 
 ```bash
 CRM_URL=http://localhost:3100 CRM_PASSWORD=你的管理员密码 npm run seed
 ```
 
-`npm test` 自动启动隔离数据库和服务，检查登录、线索转客户、客户/合同/回款、金额约束、权限、会话、CSV、页面可达与审计。端到端浏览器视觉复验尚未覆盖。
-
-## 数据与运维
-
-- 本地数据库 `data/crm.sqlite`（会同时产生 `-wal`、`-shm`），不可在运行时单独复制主文件来备份。
-- `npm run backup` 使用 SQLite `VACUUM INTO` 在线一致性快照保存到 `data/backups/`。
-- 恢复：停止服务；保留原数据库及 wal/shm 文件备份；把选定快照复制为 `data/crm.sqlite`（且确保旧 WAL/SHM 不再与快照混用）；重启。生产恢复建议先在隔离环境校验。
-- Docker 数据位于 named volume `crm_data`；升级前建议先备份并记下当前镜像版本，以便重建回滚。
-
 ## 项目结构
 
-`server.js` 全部 HTTP API 和 SQLite 模型；`public/index.html` + `public/app.js` + `public/style.css` 响应式 SPA；`tests/integration.test.js` 自动化集成测试；`scripts/backup.js` 数据库快照；`docs/` PRD、验收报告、视频证据状态。
+| 路径 | 内容 |
+|---|---|
+| `server.js` | HTTP API、SQLite 模型与迁移、权限、定时任务 |
+| `lib/` | SMTP、OIDC、企业微信、钉钉、TOTP、二维码、xlsx、CSV、备份 |
+| `public/` | 单页前端（`index.html`、`app.js`、`style.css`）与精简的钉钉 JSAPI |
+| `scripts/` | `backup.js`、`restore.js`、`seed.js` |
+| `tests/` | API 集成测试；`tests/e2e/` 浏览器测试 |
+| `docs/` | PRD、验收、审查报告、部署、第三方许可、截图 |
 
-## 遗留风险说明
+## 已知边界
 
-本系统用 Node 原生 HTTP + SQLite 以实现免依赖运行，**不是先前规划的 React + NestJS + PostgreSQL 架构**。若后续需要高并发、多节点或复杂审批，应逐步迁移。不得以架构描述代替实际实现。
+- 架构为单进程 Node + SQLite（数据库文件、定时备份与通知均在进程内），只能单实例运行；实测 6 万条记录下分页列表 60–100ms。需要多实例或更大规模时应迁移至 PostgreSQL。
+- 前端为无构建的原生 JS（约 1500 行），未迁移 React（决策说明见 REVIEW 第五节第 12 项）。
+- OIDC、企业微信、钉钉已按官方文档实现，并在模拟服务上完成测试，**尚未与真实租户联调**。
+- 未提供：短信通知、SaaS 租户自助注册与计费、字段级权限、AI 辅助功能；未进行第三方渗透测试。
