@@ -236,3 +236,16 @@ test('OIDC single sign-on', async t => {
   assert.equal(pw.status, 403); assert.match(pw.data.error, /单点登录/);
   assert.equal(typeof await s.login('admin@local.crm', 'TestPassword!1234'), 'string');
 });
+
+test('oversized uploads never crash the server (regression: unhandled stream error)', async t => {
+  const s = await startServer({ env: { ATTACH_MAX_MB: '1' } }); t.after(() => s.stop());
+  const acc = (await s.req('/accounts', { method: 'POST', body: { name: 'A' } })).data.item;
+  const up = size => fetch(`${s.base}/api/attachments?entity=accounts&entityId=${acc.id}`, { method: 'POST', body: Buffer.alloc(size), headers: { Cookie: s.cookie, 'Content-Type': 'application/pdf', 'X-File-Name': 'big.pdf' } }).then(r => r.status, e => e.cause?.code || e.message);
+  for (let round = 0; round < 3; round++) {
+    const statuses = await Promise.all(Array.from({ length: 15 }, (_, i) => up(1024 * 1024 + 1 + i * 40000)));
+    assert.deepEqual([...new Set(statuses)], [413]);
+  }
+  assert.equal((await s.req('/health')).status, 200, '服务仍在运行');
+  assert.equal(s.proc.exitCode, null);
+  assert.equal(await up(1000), 201, '正常上传不受影响');
+});

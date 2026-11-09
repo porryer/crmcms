@@ -371,6 +371,13 @@ const clientIp = req => (process.env.TRUST_PROXY === '1' && req.headers['x-forwa
 const SECURITY_HEADERS = process.env.COOKIE_SECURE === '1' ? { 'Strict-Transport-Security': 'max-age=31536000' } : {};
 
 // ---------- HTTP 工具 ----------
+/** 流式发送文件；读取出错时中止响应而不是让未处理的 error 事件导致进程崩溃 */
+function sendFileStream(res, file) {
+  const rs = fs.createReadStream(file);
+  rs.on('error', e => { logJson({ type: 'error', message: `读取文件失败：${e.message}` }); res.destroy(); });
+  res.on('close', () => rs.destroy());
+  rs.pipe(res);
+}
 const send = (res, status, body, headers = {}) => {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...SECURITY_HEADERS, ...headers });
   res.end(JSON.stringify(body));
@@ -1113,6 +1120,8 @@ function receiveFile(req, dest, max) {
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     const tmp = `${dest}.${crypto.randomBytes(4).toString('hex')}.tmp`;
     const out = fs.createWriteStream(tmp, { flags: 'wx' });
+    // 必须监听 error：超限时主动 destroy 会让未完成的写入报错，无监听器将导致进程崩溃
+    out.on('error', e => { if (!failed) finish(e); });
     const hash = crypto.createHash('sha256'); let size = 0, failed = null, settled = false;
     const finish = (err, val) => { if (settled) return; settled = true; if (err) { out.destroy(); fs.rm(tmp, { force: true }, () => {}); reject(err); } else resolve(val); };
     const tooBig = () => httpError(413, `文件不能超过 ${Math.round(max / 1048576)}MB`);
@@ -1174,7 +1183,7 @@ async function attachmentsApi(u, req, res, url, attId, sub) {
       'Content-Disposition': `attachment; filename="${encodeURIComponent(a.name)}"; filename*=UTF-8''${encodeURIComponent(a.name)}`,
       'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; sandbox", 'Cache-Control': 'private, no-store',
     });
-    return fs.createReadStream(file).pipe(res);
+    return sendFileStream(res, file);
   }
   if (m === 'DELETE' && !sub) {
     if (!canDelete(u) && a.created_by !== u.id) boom(403, '仅上传人、经理或管理员可删除附件');
@@ -1537,7 +1546,7 @@ async function api(req, res, url) {
       const st = getSettings(u.tenant_id), file = path.join(fileDir(u.tenant_id), st.logoFile || 'logo');
       if (!st.logo || !fs.existsSync(file)) boom(404, '未设置 Logo');
       res.writeHead(200, { 'Content-Type': st.logo, 'Cache-Control': 'private, max-age=300', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'" });
-      return fs.createReadStream(file).pipe(res);
+      return sendFileStream(res, file);
     }
     if (u.role !== 'admin') boom(403, '仅管理员可修改 Logo');
     const st = getSettings(u.tenant_id);
@@ -1822,7 +1831,7 @@ function staticFile(req, res, url) {
     'Content-Type': mime[path.extname(file)] || 'application/octet-stream', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-cache',
     'Content-Security-Policy': CSP, 'Referrer-Policy': 'same-origin', 'X-Frame-Options': 'DENY', ...SECURITY_HEADERS,
   });
-  fs.createReadStream(file).pipe(res);
+  sendFileStream(res, file);
 }
 
 /** 允许的 Origin：PUBLIC_ORIGIN（可逗号分隔多个）以及与 Host 一致的同源地址 */
