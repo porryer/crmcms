@@ -143,3 +143,41 @@ test('WeCom and DingTalk QR login', async t => {
     assert.deepEqual((await s.req('/users')).data.items.find(x => x.id === wang.id).identities, []);
   });
 });
+
+test('DingTalk in-app silent login (JSAPI auth code)', async t => {
+  const api = await mockOpenApi();
+  const s = await startServer({ env: { DINGTALK_API_BASE: api.base, DINGTALK_OAPI_BASE: api.base } });
+  t.after(async () => { await s.stop(); api.close(); });
+  const inapp = code => s.req('/sso/dingtalk/inapp', { method: 'POST', body: { code }, cookie: '' });
+  assert.equal((await inapp('x')).status, 400, '未启用时拒绝');
+  await s.req('/settings', { method: 'PUT', body: { dingtalk: { enabled: true, clientId: 'dingkey', clientSecret: 'ding-secret', corpId: 'ding-corp' } } });
+  const cfg = await (await fetch(s.base + '/api/sso/config')).json();
+  assert.deepEqual(cfg.dingtalk, { corpId: 'ding-corp', clientId: 'dingkey' }, '前端只拿到公开参数');
+  // 详情接口有权限：按手机号匹配
+  const uid = (await s.req('/users', { method: 'POST', body: { email: 'qian@corp.cn', name: '钱七', password: 'Password!12345', role: 'sales', mobile: '13600000007' } })).data.id;
+  api.ddInApp.set('k1', { userid: 'qian', unionid: 'union-qian', name: '钱七' });
+  api.ddUsers.set('qian', { name: '钱七', mobile: '13600000007', org_email: '' });
+  const r1 = await inapp('k1');
+  assert.equal(r1.status, 200); assert.ok(r1.cookie);
+  assert.equal((await s.req('/me', { cookie: r1.cookie })).data.user.id, uid);
+  // 免登与扫码共用 unionId 绑定：详情无权限时仍可按绑定登录；应用凭证过期自动刷新
+  api.ddUsers.set('qian', null);
+  const before = api.ddAppTokens; api.ddExpireNext = true;
+  api.ddInApp.set('k2', { userid: 'qian', unionid: 'union-qian', name: '钱七' });
+  const r2 = await inapp('k2');
+  assert.equal(r2.status, 200); assert.equal(api.ddAppTokens, before + 1);
+  assert.equal((await s.req('/me', { cookie: r2.cookie })).data.user.id, uid);
+  api.dingCodes.set('qr1', { corpId: 'ding-corp', user: { unionId: 'union-qian', nick: '钱七' } });
+  const auth = new URL((await fetch(`${s.base}/api/sso/dingtalk/start`, { redirect: 'manual' })).headers.get('location'));
+  const cb = await fetch(`${s.base}/api/sso/dingtalk/callback?authCode=qr1&state=${auth.searchParams.get('state')}`, { redirect: 'manual' });
+  assert.equal(cb.headers.get('location'), '/#/dashboard', '扫码登录命中同一绑定');
+  // 无效授权码、未匹配成员
+  const bad = await inapp('nope');
+  assert.equal(bad.status, 401); assert.match(bad.data.error, /不存在的临时授权码/);
+  api.ddInApp.set('k3', { userid: 'stranger', unionid: 'union-s', name: '陌生人' });
+  const r3 = await inapp('k3');
+  assert.equal(r3.status, 403); assert.match(r3.data.error, /未找到/);
+  // 跨站 POST 被拒绝
+  api.ddInApp.set('k4', { userid: 'qian', unionid: 'union-qian' });
+  assert.equal((await s.req('/sso/dingtalk/inapp', { method: 'POST', body: { code: 'k4' }, cookie: '', headers: { Origin: 'https://evil.example' } })).status, 403);
+});

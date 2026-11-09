@@ -18,7 +18,7 @@ const OIDC = require('./lib/oidc');
 const WECOM = require('./lib/wecom');
 const DINGTALK = require('./lib/dingtalk');
 
-const VERSION = '1.4.0';
+const VERSION = '1.5.0';
 const PORT = Number(process.env.PORT || 3100);
 const ROOT = __dirname;
 const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, 'data');
@@ -1136,34 +1136,60 @@ async function imCallback(req, res, url, provider) {
   }
 
   // ---- 登录：已绑定 → 邮箱 → 手机号 → 自动开通 ----
+  const r = imResolveUser(st.tenant_id, provider, cfg, who);
+  if (r.error) return ssoFail(res, r.error);
+  imCompleteLogin(r.user, provider, res);
+  res.writeHead(302, { Location: '/#/dashboard', 'Cache-Control': 'no-store' });
+  res.end();
+}
+
+/** 第三方身份 → 成员（已绑定 → 邮箱 → 手机号 → 自动开通），返回 { user } 或 { error }；匹配成功时自动绑定 */
+function imResolveUser(tenantId, provider, cfg, who) {
+  const name = PROVIDER_NAME[provider];
+  const bound = db.prepare('SELECT * FROM identities WHERE tenant_id=? AND provider=? AND subject=?').get(tenantId, provider, who.subject);
   let user = bound ? db.prepare('SELECT * FROM users WHERE id=?').get(bound.user_id) : null;
   const email = String(who.email || '').trim().toLowerCase(), mobile = normMobile(who.mobile);
-  if (!user && email) user = db.prepare('SELECT * FROM users WHERE tenant_id=? AND email=?').get(st.tenant_id, email);
+  if (!user && email) user = db.prepare('SELECT * FROM users WHERE tenant_id=? AND email=?').get(tenantId, email);
   if (!user && mobile.length === 11) {
-    const hits = db.prepare('SELECT * FROM users WHERE tenant_id=? AND mobile<>\'\'').all(st.tenant_id).filter(x => normMobile(x.mobile) === mobile);
+    const hits = db.prepare('SELECT * FROM users WHERE tenant_id=? AND mobile<>\'\'').all(tenantId).filter(x => normMobile(x.mobile) === mobile);
     if (hits.length === 1) user = hits[0];
   }
-  if (user && !user.active) return ssoFail(res, '账号已停用，请联系管理员');
+  if (user && !user.active) return { error: '账号已停用，请联系管理员' };
   if (user && !bound) {
-    const other = db.prepare('SELECT subject FROM identities WHERE tenant_id=? AND provider=? AND user_id=?').get(st.tenant_id, provider, user.id);
-    if (other) return ssoFail(res, `该成员已绑定其他${name}账号，请联系管理员`);
+    const other = db.prepare('SELECT subject FROM identities WHERE tenant_id=? AND provider=? AND user_id=?').get(tenantId, provider, user.id);
+    if (other) return { error: `该成员已绑定其他${name}账号，请联系管理员` };
   }
   if (!user) {
     if (!cfg.autoCreate || !/^\S+@\S+\.\S+$/.test(email)) {
-      return ssoFail(res, `未找到与该${name}账号对应的成员。请先用账号密码登录，在右上角个人菜单中“绑定${name}”；或请管理员在团队管理中填写手机号/邮箱`);
+      return { error: `未找到与该${name}账号对应的成员。请先用账号密码登录，在右上角个人菜单中“绑定${name}”；或请管理员在团队管理中填写手机号/邮箱` };
     }
     const uid = newId();
     db.prepare('INSERT INTO users(id,tenant_id,email,password_hash,role,display_name,active,created_at,department,data_scope,mobile) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
-      .run(uid, st.tenant_id, email, hashPwd(crypto.randomBytes(32).toString('hex')), ['sales', 'viewer', 'manager'].includes(cfg.defaultRole) ? cfg.defaultRole : 'sales', String(who.name || email.split('@')[0]).slice(0, 100), 1, now(), String(cfg.defaultDept || '').slice(0, 50), '', String(who.mobile || '').slice(0, 30));
+      .run(uid, tenantId, email, hashPwd(crypto.randomBytes(32).toString('hex')), ['sales', 'viewer', 'manager'].includes(cfg.defaultRole) ? cfg.defaultRole : 'sales', String(who.name || email.split('@')[0]).slice(0, 100), 1, now(), String(cfg.defaultDept || '').slice(0, 50), '', String(who.mobile || '').slice(0, 30));
     user = db.prepare('SELECT * FROM users WHERE id=?').get(uid);
     audit(user, 'create', 'users', uid, { via: provider, email });
   }
-  if (!bound) bind(user.id);
+  if (!bound) db.prepare('INSERT OR REPLACE INTO identities(tenant_id,provider,subject,user_id,name,created_at) VALUES(?,?,?,?,?,?)').run(tenantId, provider, who.subject, user.id, String(who.name || '').slice(0, 100), now());
+  return { user };
+}
+function imCompleteLogin(user, provider, res) {
   createSession(user, res);
   db.prepare('UPDATE users SET last_login_at=? WHERE id=?').run(now(), user.id);
   audit(user, 'login', 'session', user.id, { via: provider });
-  res.writeHead(302, { Location: '/#/dashboard', 'Cache-Control': 'no-store' });
-  res.end();
+}
+/** 钉钉客户端内免登：前端 JSAPI 取得授权码后 POST 到此 */
+async function dingtalkInApp(req, res) {
+  const tenantId = ssoTenantId(), cfg = getSettings(tenantId).dingtalk;
+  if (!cfg.enabled) boom(400, '未启用钉钉登录');
+  const b = await readBody(req), code = String(b.code || '');
+  if (!code || code.length > 200) boom(400, '缺少免登授权码');
+  let who;
+  try { who = await DINGTALK.inAppIdentify(cfg, code); }
+  catch (e) { logJson({ type: 'sso_error', provider: 'dingtalk-inapp', message: e.message }); boom(401, e.message); }
+  const r = imResolveUser(tenantId, 'dingtalk', cfg, who);
+  if (r.error) boom(403, r.error);
+  imCompleteLogin(r.user, 'dingtalk', res);
+  return send(res, 200, { ok: true });
 }
 
 // ---------- 站内通知 ----------
@@ -1472,9 +1498,14 @@ async function api(req, res, url) {
 
   if (p === '/api/sso/config' && m === 'GET') {
     const st = getSettings(ssoTenantId()), providers = enabledProviders(st);
-    return send(res, 200, { enabled: !!st.sso.enabled, buttonText: st.sso.buttonText || '企业账号登录', enforce: !!st.sso.enforce && providers.length > 0, providers });
+    return send(res, 200, {
+      enabled: !!st.sso.enabled, buttonText: st.sso.buttonText || '企业账号登录', enforce: !!st.sso.enforce && providers.length > 0, providers,
+      // 钉钉客户端内免登所需的公开参数（非密钥）
+      ...(st.dingtalk.enabled ? { dingtalk: { corpId: st.dingtalk.corpId, clientId: st.dingtalk.clientId } } : {}),
+    });
   }
   const imMatch = p.match(/^\/api\/sso\/(wecom|dingtalk)\/(start|callback)$/);
+  if (p === '/api/sso/dingtalk/inapp' && m === 'POST') return dingtalkInApp(req, res);
   if (imMatch && m === 'GET') return imMatch[2] === 'start' ? imStart(req, res, url, imMatch[1]) : imCallback(req, res, url, imMatch[1]);
   if (p === '/api/sso/start' && m === 'GET') return ssoStart(req, res);
   if (p === '/api/sso/callback' && m === 'GET') return ssoCallback(req, res, url);

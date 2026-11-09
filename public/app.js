@@ -277,7 +277,12 @@ function renderLogin() {
   if (ssoErr) { toast(ssoErr, true); history.replaceState(null, '', location.pathname); }
   fetch('/api/sso/config').then(r => r.json()).then(c => {
     if (!c.providers?.length || !$('#ssoBox')) return;
-    $('#ssoBox').innerHTML = `<div class="or"><span>或</span></div><div class="sso-btns">${c.providers.map(p => `<a class="btn light block sso-${p.id}" href="${esc(p.url)}">${icon(PROVIDER_ICON[p.id] || 'shield')}${esc(p.text)}</a>`).join('')}</div>${c.enforce ? '<p class="muted small center">本企业已启用单点登录，仅管理员可使用密码登录</p>' : ''}`;
+    const inDing = IN_DINGTALK && c.dingtalk;
+    $('#ssoBox').innerHTML = `<div class="or"><span>或</span></div><div class="sso-btns">${inDing ? `<button type="button" class="btn block" data-act="dd-auto">${icon('bell')}钉钉免登</button>` : ''}${c.providers.filter(p => !(inDing && p.id === 'dingtalk')).map(p => `<a class="btn light block sso-${p.id}" href="${esc(p.url)}">${icon(PROVIDER_ICON[p.id] || 'shield')}${esc(p.text)}</a>`).join('')}</div><p class="muted small center" id="ddStatus" hidden></p>${c.enforce ? '<p class="muted small center">本企业已启用单点登录，仅管理员可使用密码登录</p>' : ''}`;
+    ui.ddCfg = c.dingtalk;
+    // 钉钉客户端内自动免登（主动退出后不自动登录，可点按钮重试）
+    let skip = false; try { skip = sessionStorage.getItem('novacrm.noAuto') === '1'; } catch { /* ignore */ }
+    if (inDing && !skip) dingtalkAutoLogin().catch(() => {});
   }).catch(() => {});
   $('#loginForm').addEventListener('submit', async e => {
     e.preventDefault();
@@ -303,6 +308,37 @@ function renderLogin() {
   });
 }
 
+// ======================= 钉钉客户端内免登 =======================
+const IN_DINGTALK = /DingTalk/i.test(navigator.userAgent);
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) return resolve();
+    const el = document.createElement('script');
+    el.src = src; el.onload = () => resolve(); el.onerror = () => reject(new Error('加载钉钉组件失败'));
+    document.head.appendChild(el);
+  });
+}
+async function dingtalkAutoLogin() {
+  const cfg = ui.ddCfg, status = $('#ddStatus');
+  if (!cfg) return;
+  const say = (msg, err) => { if (status) { status.hidden = false; status.textContent = msg; status.classList.toggle('neg', !!err); } };
+  say('正在通过钉钉免登…');
+  try {
+    await loadScript('/vendor/dingtalk-lite.js');
+    const dd = window.ddLite;
+    const code = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('钉钉免登超时，请确认在本企业钉钉中打开')), 10000);
+      const fail = e => { clearTimeout(timer); reject(new Error(e?.errorMessage || e?.message || '获取免登授权码失败')); };
+      if (typeof dd.error === 'function') dd.error(fail);
+      dd.ready(() => dd.requestAuthCode({ corpId: cfg.corpId, clientId: cfg.clientId }).then(r => { clearTimeout(timer); resolve(r?.code || r?.authCode); }, fail));
+    });
+    if (!code) throw new Error('钉钉未返回免登授权码');
+    await API.post('/sso/dingtalk/inapp', { code });
+    const r = await request('/me'); me = r.user; settings = r.settings; ui.providers = r.providers || [];
+    if (!location.hash || location.hash === '#/') location.hash = '#/dashboard'; else route();
+  } catch (e) { say(e.message, true); toast(e.message, true); throw e; }
+}
+
 // ======================= 布局 =======================
 function renderShell(r) {
   const active = r.page;
@@ -317,7 +353,7 @@ function renderShell(r) {
   const shell = $('#shell');
   const html = `
     <aside class="aside" id="aside">
-      <a class="brand" href="#/dashboard">${settings.logo ? `<img class="logo img" src="/api/settings/logo?v=${encodeURIComponent(settings.logoV || '')}" alt="">` : '<span class="logo">N</span>'}<span class="navtext">${esc(settings.systemName)}</span><small class="navtext">V1.4</small></a>
+      <a class="brand" href="#/dashboard">${settings.logo ? `<img class="logo img" src="/api/settings/logo?v=${encodeURIComponent(settings.logoV || '')}" alt="">` : '<span class="logo">N</span>'}<span class="navtext">${esc(settings.systemName)}</span><small class="navtext">V1.5</small></a>
       <nav>${items}</nav>
       <div class="side-bottom navtext">${esc(settings.companyName)}<br><span>企业版 · 数据本地存储</span></div>
     </aside>
@@ -1198,6 +1234,7 @@ async function pageSettings() {
       <form id="dingtalkForm" class="settings-form wide-form"><h4 class="sec">钉钉扫码登录</h4>
         <ol class="howto small"><li>钉钉开放平台 → 应用开发 → 企业内部应用 → 创建应用，在“凭证与基础信息”获取 Client ID（AppKey）与 Client Secret（AppSecret），在开发者后台首页获取企业 CorpId。</li>
           <li>“安全设置”→ 重定向 URL 填写：<code>${esc(d.redirectUri || '')}</code>；“权限管理”中开通“个人手机号信息”“通讯录个人信息读权限”（用于按手机号/邮箱匹配成员）。</li>
+          <li>客户端内免登：在应用“网页应用”中把<b>应用首页地址</b>和<b>PC 端首页地址</b>填写为本系统地址并发布到工作台；成员在钉钉工作台打开即自动登录，无需扫码。</li>
           <li>只允许本企业（CorpId 一致）的钉钉账号登录。</li></ol>
         <label class="check"><input type="checkbox" name="enabled" ${d.enabled ? 'checked' : ''}> 启用钉钉登录</label>
         <div class="form-grid">
@@ -1321,7 +1358,8 @@ const ACTIONS = {
   'close-nav': () => document.body.classList.remove('nav-open'),
   'toggle-group': t => { const g = t.dataset.group; ui.openGroups.has(g) ? ui.openGroups.delete(g) : ui.openGroups.add(g); t.parentElement.classList.toggle('open'); if (ui.collapsed) { ui.collapsed = false; $('#shell').classList.remove('collapsed'); } },
   'user-menu': () => { const d = $('#userDropdown'); d.hidden = !d.hidden; },
-  logout: async () => { try { await API.post('/logout'); } catch { /* ignore */ } me = null; renderLogin(); },
+  logout: async () => { try { await API.post('/logout'); } catch { /* ignore */ } try { sessionStorage.setItem('novacrm.noAuto', '1'); } catch { /* ignore */ } me = null; renderLogin(); },
+  'dd-auto': () => dingtalkAutoLogin().catch(() => {}),
   password: () => openModal({
     title: '修改登录密码',
     body: '<label class="fld wide"><span>当前密码</span><input class="field" name="oldPassword" type="password" required autocomplete="current-password"></label><label class="fld wide"><span>新密码（至少12位）</span><input class="field" name="newPassword" type="password" minlength="12" required autocomplete="new-password"></label>',

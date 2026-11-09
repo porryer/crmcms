@@ -34,7 +34,7 @@ docker compose logs crm      # 首次启动信息
 | `DIGEST_TIME` | 08:30 | 每日待办摘要邮件发送时间（需在系统设置中启用 SMTP） |
 | `ACCESS_LOG` | 镜像中为 1 | JSON 行访问日志 |
 | `ATTACH_MAX_MB` | 20 | 单个附件大小上限 |
-| `WECOM_API_BASE` 等 | 官方地址 | 企业微信/钉钉接口地址覆盖（私有化或代理场景）：`WECOM_API_BASE`、`WECOM_LOGIN_BASE`、`WECOM_OAUTH_BASE`、`DINGTALK_API_BASE`、`DINGTALK_LOGIN_BASE` |
+| `WECOM_API_BASE` 等 | 官方地址 | 企业微信/钉钉接口地址覆盖（私有化或代理场景）：`WECOM_API_BASE`、`WECOM_LOGIN_BASE`、`WECOM_OAUTH_BASE`、`DINGTALK_API_BASE`、`DINGTALK_LOGIN_BASE`、`DINGTALK_OAPI_BASE`（钉钉客户端内免登所用旧版服务端接口） |
 
 > 企业微信/钉钉/OIDC 登录的回调地址基于 `PUBLIC_ORIGIN` 生成，生产环境务必设置为实际 https 域名，并在两个平台后台登记该域名。
 

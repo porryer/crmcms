@@ -84,6 +84,9 @@ async function mockOpenApi() {
     wecomCodes: new Map(), // code -> { userid } | { openid }
     wecomUsers: new Map(), // userid -> detail | null(无权限)
     dingCodes: new Map(),  // code -> { corpId, user }
+    ddAppTokens: 0, ddExpireNext: false,
+    ddInApp: new Map(),    // 免登 code -> { userid, unionid, name }
+    ddUsers: new Map(),    // userid -> 详情 | null（无权限）
   };
   const server = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://x'), q = u.searchParams;
@@ -122,6 +125,23 @@ async function mockOpenApi() {
         if (!c) return json({ code: 'InvalidAuthentication', message: 'token invalid' }, 401);
         st.dingCodes.delete(code);
         return json(c.user);
+      }
+      // ---- 钉钉旧版服务端接口（客户端内免登） ----
+      if (u.pathname === '/gettoken') {
+        if (q.get('appkey') !== 'dingkey' || q.get('appsecret') !== 'ding-secret') return json({ errcode: 40089, errmsg: '不合法的corpid或corpsecret' });
+        st.ddAppTokens++; return json({ errcode: 0, access_token: 'dd-app-' + st.ddAppTokens, expires_in: 7200 });
+      }
+      if (u.pathname === '/topapi/v2/user/getuserinfo') {
+        if (!String(q.get('access_token')).startsWith('dd-app-')) return json({ errcode: 40014, errmsg: '不合法的access_token' });
+        if (st.ddExpireNext) { st.ddExpireNext = false; return json({ errcode: 88, errmsg: 'access_token 已过期' }); }
+        const b = JSON.parse(body || '{}'), c = st.ddInApp.get(b.code);
+        if (!c) return json({ errcode: 40078, errmsg: '不存在的临时授权码' });
+        st.ddInApp.delete(b.code);
+        return json({ errcode: 0, errmsg: 'ok', result: { userid: c.userid, unionid: c.unionid, name: c.name, device_id: 'd1', sys: false } });
+      }
+      if (u.pathname === '/topapi/v2/user/get') {
+        const b = JSON.parse(body || '{}'), d = st.ddUsers.get(b.userid);
+        return d ? json({ errcode: 0, errmsg: 'ok', result: { userid: b.userid, ...d } }) : json({ errcode: 60011, errmsg: '没有调用该接口的权限' });
       }
       // ---- 浏览器授权页：直接“扫码确认”并回跳（用于 E2E） ----
       if (u.pathname === '/wwlogin/sso/login' || u.pathname === '/connect/oauth2/authorize') {

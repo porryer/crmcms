@@ -203,6 +203,57 @@ test('end-to-end smoke', { timeout: 180000 }, async t => {
     } finally { await s3.stop(); api.close(); }
   });
 
+  await t.test('DingTalk in-app silent login (simulated client)', async () => {
+    // 真实 SDK 包可在严格 CSP 下加载
+    const pReal = await (await browser.newContext()).newPage();
+    const cspErrors = []; pReal.on('console', m => { if (m.type() === 'error') cspErrors.push(m.text()); });
+    await pReal.goto(B + '/');
+    await pReal.addScriptTag({ url: '/vendor/dingtalk-lite.js' });
+    assert.deepEqual(await pReal.evaluate(() => [typeof window.ddLite.ready, typeof window.ddLite.requestAuthCode, typeof window.ddLite.env]), ['function', 'function', 'object']);
+    assert.ok(!cspErrors.some(e => /Content Security Policy/.test(e)), cspErrors.join('\n'));
+
+    const api = await mockOpenApi();
+    const s4 = await startServer({ env: { DINGTALK_API_BASE: api.base, DINGTALK_OAPI_BASE: api.base } });
+    try {
+      await s4.req('/settings', { method: 'PUT', body: { dingtalk: { enabled: true, clientId: 'dingkey', clientSecret: 'ding-secret', corpId: 'ding-corp' } } });
+      await s4.req('/users', { method: 'POST', body: { email: 'sun@corp.cn', name: '孙八', password: 'Password!12345', role: 'sales', mobile: '13500000008' } });
+      api.ddUsers.set('sun', { name: '孙八', mobile: '13500000008' });
+      // 模拟钉钉容器：UA 含 DingTalk；SDK 换成返回授权码的桩（真实原生桥只存在于钉钉 App 内）。
+      // route 处理函数按请求执行，故每次加载都会带上当时的 nextCode
+      let nextCode = null;
+      const ctx = await browser.newContext({ userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0) AppleWebKit/605.1.15 DingTalk/7.6.0 Channel/201200' });
+      await ctx.route('**/vendor/dingtalk-lite.js', route => route.fulfill({ contentType: 'text/javascript', body:
+        `window.ddLite = { env: { platform: 'ios' }, error: function () {}, ready: function (cb) { setTimeout(cb, 10); },
+          requestAuthCode: function (o) { window.__ddArgs = o; return Promise.resolve({ code: ${JSON.stringify(nextCode)} }); } };` }));
+      const pg = await ctx.newPage();
+      pg.on('pageerror', e => problems.push('dd pageerror: ' + e.message));
+      const issue = code => { nextCode = code; api.ddInApp.set(code, { userid: 'sun', unionid: 'union-sun', name: '孙八' }); };
+      // 1. 打开即自动免登
+      issue('dd-auto-1');
+      await pg.goto(s4.base + '/');
+      await pg.waitForSelector('.kpis');
+      assert.match(await pg.textContent('.uname'), /孙八/);
+      assert.deepEqual(await pg.evaluate(() => window.__ddArgs), { corpId: 'ding-corp', clientId: 'dingkey' });
+      // 2. 主动退出后不自动登录；点“钉钉免登”重试（SDK 已加载，直接换下一次授权码）
+      await pg.click('[data-act=user-menu]'); await pg.click('[data-act=logout]');
+      await pg.waitForSelector('[data-act=dd-auto]');
+      await pg.waitForTimeout(300);
+      assert.ok(await pg.isVisible('#loginForm'), '退出后停留在登录页');
+      issue('dd-auto-2');
+      await pg.evaluate(() => { window.ddLite.requestAuthCode = () => Promise.resolve({ code: 'dd-auto-2' }); });
+      await pg.click('[data-act=dd-auto]');
+      await pg.waitForSelector('.kpis');
+      // 3. 授权失败：提示错误，仍可使用账号密码登录
+      const pg2 = await (await browser.newContext({ userAgent: 'Mozilla/5.0 DingTalk/7.6.0' })).newPage();
+      await pg2.route('**/vendor/dingtalk-lite.js', route => route.fulfill({ contentType: 'text/javascript', body: `window.ddLite={env:{},error:function(){},ready:function(cb){cb()},requestAuthCode:function(){return Promise.reject({errorMessage:'用户未授权'})}};` }));
+      await pg2.goto(s4.base + '/');
+      await pg2.waitForSelector('#ddStatus:not([hidden])');
+      assert.match(await pg2.textContent('#ddStatus'), /用户未授权/);
+      assert.ok(await pg2.isVisible('#loginForm [name=password]'));
+      await ctx.close();
+    } finally { await s4.stop(); api.close(); }
+  });
+
   await t.test('mobile layout', async () => {
     const m = await browser.newContext({ ...devices['iPhone 13'] });
     const mp = await m.newPage();
