@@ -278,11 +278,13 @@ function renderLogin() {
   fetch('/api/sso/config').then(r => r.json()).then(c => {
     if (!c.providers?.length || !$('#ssoBox')) return;
     const inDing = IN_DINGTALK && c.dingtalk;
-    $('#ssoBox').innerHTML = `<div class="or"><span>或</span></div><div class="sso-btns">${inDing ? `<button type="button" class="btn block" data-act="dd-auto">${icon('bell')}钉钉免登</button>` : ''}${c.providers.filter(p => !(inDing && p.id === 'dingtalk')).map(p => `<a class="btn light block sso-${p.id}" href="${esc(p.url)}">${icon(PROVIDER_ICON[p.id] || 'shield')}${esc(p.text)}</a>`).join('')}</div><p class="muted small center" id="ddStatus" hidden></p>${c.enforce ? '<p class="muted small center">本企业已启用单点登录，仅管理员可使用密码登录</p>' : ''}`;
+    $('#ssoBox').innerHTML = `<div class="or"><span>或</span></div><div class="sso-btns">${inDing ? `<button type="button" class="btn block" data-act="dd-auto">${icon('bell')}钉钉免登</button>` : ''}${c.providers.filter(p => !(inDing && p.id === 'dingtalk')).map(p => `<a class="btn light block sso-${p.id}" href="${esc(p.url + nextParam())}">${icon(PROVIDER_ICON[p.id] || 'shield')}${esc(p.text)}</a>`).join('')}</div><p class="muted small center" id="ddStatus" hidden></p>${c.enforce ? '<p class="muted small center">本企业已启用单点登录，仅管理员可使用密码登录</p>' : ''}`;
     ui.ddCfg = c.dingtalk;
     // 钉钉客户端内自动免登（主动退出后不自动登录，可点按钮重试）
     let skip = false; try { skip = sessionStorage.getItem('novacrm.noAuto') === '1'; } catch { /* ignore */ }
     if (inDing && !skip) dingtalkAutoLogin().catch(() => {});
+    // 企业微信客户端内：自动走网页授权静默登录
+    if (IN_WXWORK && c.wecom && !skip) location.href = '/api/sso/wecom/start' + nextParam();
   }).catch(() => {});
   $('#loginForm').addEventListener('submit', async e => {
     e.preventDefault();
@@ -310,6 +312,12 @@ function renderLogin() {
 
 // ======================= 钉钉客户端内免登 =======================
 const IN_DINGTALK = /DingTalk/i.test(navigator.userAgent);
+const IN_WXWORK = /wxwork/i.test(navigator.userAgent);
+/** 登录后回到当前页面（例如从消息通知链接进入） */
+function nextParam() {
+  const h = location.hash;
+  return h && h.startsWith('#/') && !h.startsWith('#/login') && h.length <= 300 ? '?next=' + encodeURIComponent(h) : '';
+}
 function loadScript(src) {
   return new Promise((resolve, reject) => {
     if (document.querySelector(`script[src="${src}"]`)) return resolve();
@@ -371,6 +379,7 @@ function renderShell(r) {
             <button data-act="password">${icon('key')}修改密码</button>
             <button data-act="mfa">${icon('shield')}两步验证${me.mfaEnabled ? '（已启用）' : ''}</button>
             ${(ui.providers || []).filter(p => p.id !== 'oidc').map(p => { const b = (me.identities || []).find(x => x.provider === p.id); return b ? `<button data-act="im-unbind" data-provider="${p.id}">${icon(PROVIDER_ICON[p.id])}已绑定${PROVIDER_NAME[p.id]}${b.name ? '（' + esc(b.name) + '）' : ''}·解绑</button>` : `<a class="dd-link" href="/api/sso/${p.id}/start?bind=1">${icon(PROVIDER_ICON[p.id])}绑定${PROVIDER_NAME[p.id]}</a>`; }).join('')}
+            ${(me.identities || []).length && (settings.wecom?.enabled || settings.dingtalk?.enabled) ? `<button data-act="im-toggle">${icon('message')}工作通知：${me.imNotify ? '已开启' : '已关闭'}</button>` : ''}
             ${settings.smtp?.enabled ? `<button data-act="email-toggle">${icon('mail')}邮件通知：${me.emailNotify ? '已开启' : '已关闭'}</button>` : ''}
             <button data-act="logout">${icon('logout')}退出登录</button>
           </div>
@@ -1212,6 +1221,8 @@ async function pageSettings() {
       <p class="muted small">按邮箱匹配成员，首次登录后与 IdP 的用户标识（sub）绑定；单点登录用户的多因素认证由 IdP 负责。</p></form>`;
     const roleSel = v => [['sales', '销售'], ['viewer', '只读'], ['manager', '销售经理']].map(([k, l]) => `<option value="${k}" ${v === k ? 'selected' : ''}>${l}</option>`).join('');
     const w = settings.wecom || {}, d = settings.dingtalk || {};
+    const imNotifyFields = x => `<div class="fld"><label class="check"><input type="checkbox" name="notify" ${x.notify ? 'checked' : ''}> 推送个人工作通知（发给已绑定该账号的成员）</label>
+        <div class="checks">${[['approval', '合同审批'], ['assign', '分配负责人'], ['digest', '每日待办摘要']].map(([k, l]) => `<label class="check"><input type="checkbox" name="notifyEvents" value="${k}" ${(x.notifyEvents || []).includes(k) ? 'checked' : ''}> ${l}</label>`).join('')}</div></div>`;
     const imCommon = x => `<label class="fld"><span>登录按钮文字</span><input class="field" name="buttonText" maxlength="30" value="${esc(x.buttonText || '')}"></label>
         <label class="fld"><span>自动开通账号的默认角色</span><select class="field" name="defaultRole">${roleSel(x.defaultRole)}</select></label>
         <label class="fld"><span>自动开通账号的默认部门</span><select class="field" name="defaultDept">${optionList('dict:departments', x.defaultDept || '', '不指定')}</select></label>`;
@@ -1230,7 +1241,8 @@ async function pageSettings() {
           ${imCommon(w)}
         </div>
         <label class="check"><input type="checkbox" name="autoCreate" ${w.autoCreate ? 'checked' : ''}> 首次登录自动开通账号（需企业微信返回邮箱；2022 年后新建的应用通常拿不到邮箱/手机号，建议成员自行在个人菜单中绑定）</label>
-        <div class="tools"><button class="btn" type="submit">保存企业微信设置</button>${w.enabled ? '<a class="btn light" href="/api/sso/wecom/start" target="_blank" rel="noopener">测试扫码登录</a>' : ''}</div></form>
+        ${imNotifyFields(w)}
+        <div class="tools"><button class="btn" type="submit">保存企业微信设置</button>${w.enabled ? '<a class="btn light" href="/api/sso/wecom/start" target="_blank" rel="noopener">测试扫码登录</a>' : ''}${w.notify ? '<button type="button" class="btn light" data-act="im-test" data-provider="wecom">给我发测试消息</button>' : ''}</div></form>
       <form id="dingtalkForm" class="settings-form wide-form"><h4 class="sec">钉钉扫码登录</h4>
         <ol class="howto small"><li>钉钉开放平台 → 应用开发 → 企业内部应用 → 创建应用，在“凭证与基础信息”获取 Client ID（AppKey）与 Client Secret（AppSecret），在开发者后台首页获取企业 CorpId。</li>
           <li>“安全设置”→ 重定向 URL 填写：<code>${esc(d.redirectUri || '')}</code>；“权限管理”中开通“个人手机号信息”“通讯录个人信息读权限”（用于按手机号/邮箱匹配成员）。</li>
@@ -1244,7 +1256,9 @@ async function pageSettings() {
           ${imCommon(d)}
         </div>
         <label class="check"><input type="checkbox" name="autoCreate" ${d.autoCreate ? 'checked' : ''}> 首次登录自动开通账号（需钉钉返回邮箱）</label>
-        <div class="tools"><button class="btn" type="submit">保存钉钉设置</button>${d.enabled ? '<a class="btn light" href="/api/sso/dingtalk/start" target="_blank" rel="noopener">测试扫码登录</a>' : ''}</div></form>
+        <label class="fld"><span>应用 AgentId（推送工作通知需要）</span><input class="field" name="agentId" value="${esc(d.agentId || '')}" inputmode="numeric"></label>
+        ${imNotifyFields(d)}
+        <div class="tools"><button class="btn" type="submit">保存钉钉设置</button>${d.enabled ? '<a class="btn light" href="/api/sso/dingtalk/start" target="_blank" rel="noopener">测试扫码登录</a>' : ''}${d.notify ? '<button type="button" class="btn light" data-act="im-test" data-provider="dingtalk">给我发测试消息</button>' : ''}</div></form>
       <p class="muted small">成员匹配顺序：已绑定 → 邮箱 → 手机号（在团队管理中填写）→ 自动开通。匹配不到时，成员可先用账号密码登录，在右上角个人菜单中“绑定企业微信 / 钉钉”。</p>
       <div class="sec"></div>${pane}`;
   } else if (tab === 'approval') {
@@ -1313,7 +1327,7 @@ async function pageSettings() {
   for (const prov of ['wecom', 'dingtalk']) {
     $(`#${prov}Form`)?.addEventListener('submit', async e => {
       e.preventDefault();
-      const fd = new FormData(e.currentTarget), body = { enabled: fd.has('enabled'), autoCreate: fd.has('autoCreate') };
+      const fd = new FormData(e.currentTarget), body = { enabled: fd.has('enabled'), autoCreate: fd.has('autoCreate'), notify: fd.has('notify'), notifyEvents: fd.getAll('notifyEvents') };
       for (const k of ['corpId', 'agentId', 'clientId', 'buttonText', 'defaultRole', 'defaultDept']) if (fd.has(k)) body[k] = fd.get(k);
       for (const k of ['secret', 'clientSecret']) if (fd.get(k)) body[k] = fd.get(k);
       const btn = e.currentTarget.querySelector('[type=submit]'); btn.disabled = true;
@@ -1471,7 +1485,9 @@ const ACTIONS = {
   'ap-del': t => { ui.apDraft.splice(Number(t.dataset.i), 1); pageSettings(); },
   'smtp-test': async t => { t.disabled = true; try { const r = await API.post('/settings/smtp-test'); toast(`测试邮件已发送至 ${r.to}`); } finally { t.disabled = false; } },
   'digest-now': async () => { const r = await API.post('/settings/digest-now'); toast(`已发送 ${r.sent} 封摘要邮件`); },
-  'email-toggle': async () => { const r = await API.patch('/me', { emailNotify: !me.emailNotify }); me = r.user; toast(me.emailNotify ? '已开启邮件通知' : '已关闭邮件通知'); $('#shell')?.remove(); rerender(); },
+  'im-toggle': async () => { const r = await API.patch('/me', { imNotify: !me.imNotify }); me = { ...me, ...r.user }; toast(me.imNotify ? '已开启工作通知' : '已关闭工作通知'); $('#shell')?.remove(); rerender(); },
+  'im-test': async t => { t.disabled = true; try { await API.post('/settings/im-test', { provider: t.dataset.provider }); toast('测试消息已发送，请在手机上查看'); } finally { t.disabled = false; } },
+  'email-toggle': async () => { const r = await API.patch('/me', { emailNotify: !me.emailNotify }); me = { ...me, ...r.user }; toast(me.emailNotify ? '已开启邮件通知' : '已关闭邮件通知'); $('#shell')?.remove(); rerender(); },
   'webhook-test': async () => { await API.post('/settings/webhook-test'); toast('测试消息已发送，请在群内查看'); },
   'backup-now': async () => { const r = await API.post('/backups'); toast('已生成备份 ' + r.name); rerender(); },
   'user-edit': t => userModal(R.users.find(u => u.id === t.dataset.id)),

@@ -87,6 +87,7 @@ async function mockOpenApi() {
     ddAppTokens: 0, ddExpireNext: false,
     ddInApp: new Map(),    // 免登 code -> { userid, unionid, name }
     ddUsers: new Map(),    // userid -> 详情 | null（无权限）
+    wecomMessages: [], ddNotices: [], ddUnion: new Map(), // unionid -> userid
   };
   const server = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://x'), q = u.searchParams;
@@ -103,6 +104,22 @@ async function mockOpenApi() {
         if (!c) return json({ errcode: 40029, errmsg: 'invalid code' });
         st.wecomCodes.delete(q.get('code'));
         return json({ errcode: 0, ...c });
+      }
+      if (u.pathname === '/cgi-bin/message/send') {
+        const b = JSON.parse(body || '{}');
+        if (!String(q.get('access_token')).startsWith('tok')) return json({ errcode: 40014, errmsg: 'invalid access_token' });
+        st.wecomMessages.push(b);
+        const unknown = b.touser.split('|').filter(id => !st.wecomUsers.has(id));
+        return json({ errcode: 0, errmsg: 'ok', invaliduser: unknown.join('|') });
+      }
+      if (u.pathname === '/topapi/user/getbyunionid') {
+        const b = JSON.parse(body || '{}'), id = st.ddUnion.get(b.unionid);
+        return id ? json({ errcode: 0, result: { contact_type: 0, userid: id } }) : json({ errcode: 60121, errmsg: '找不到该用户' });
+      }
+      if (u.pathname === '/topapi/message/corpconversation/asyncsend_v2') {
+        const b = JSON.parse(body || '{}');
+        if (b.agent_id !== 4000001) return json({ errcode: 40056, errmsg: '不合法的agentid' });
+        st.ddNotices.push(b); return json({ errcode: 0, errmsg: 'ok', task_id: st.ddNotices.length });
       }
       if (u.pathname === '/cgi-bin/user/get') {
         const d = st.wecomUsers.get(q.get('userid'));

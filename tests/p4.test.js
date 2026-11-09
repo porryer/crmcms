@@ -181,3 +181,89 @@ test('DingTalk in-app silent login (JSAPI auth code)', async t => {
   api.ddInApp.set('k4', { userid: 'qian', unionid: 'union-qian' });
   assert.equal((await s.req('/sso/dingtalk/inapp', { method: 'POST', body: { code: 'k4' }, cookie: '', headers: { Origin: 'https://evil.example' } })).status, 403);
 });
+
+test('personal work notifications via WeCom app message and DingTalk work notice', async t => {
+  const api = await mockOpenApi();
+  const s = await startServer({ env: { WECOM_API_BASE: api.base, DINGTALK_API_BASE: api.base, DINGTALK_OAPI_BASE: api.base, PUBLIC_ORIGIN: 'https://crm.example.com' } });
+  t.after(async () => { await s.stop(); api.close(); });
+  const flush = () => new Promise(r => setTimeout(r, 300));
+  // 未启用登录不能开通知；钉钉通知需 AgentId
+  assert.equal((await s.req('/settings', { method: 'PUT', body: { wecom: { notify: true } } })).status, 400);
+  await s.req('/settings', { method: 'PUT', body: { wecom: { enabled: true, corpId: 'ww123', agentId: '1000002', secret: 'wecom-secret', notify: true } } });
+  assert.equal((await s.req('/settings', { method: 'PUT', body: { dingtalk: { enabled: true, clientId: 'dingkey', clientSecret: 'ding-secret', corpId: 'ding-corp', notify: true } } })).status, 400);
+  await s.req('/settings', { method: 'PUT', body: { dingtalk: { enabled: true, clientId: 'dingkey', clientSecret: 'ding-secret', corpId: 'ding-corp', agentId: '4000001', notify: true } } });
+  await s.req('/settings', { method: 'PUT', body: { approval: { levels: [{ name: '经理审批', role: 'manager', minAmount: 0 }] } } });
+  const mk = (email, name, role) => s.req('/users', { method: 'POST', body: { email, name, password: 'Password!12345', role, dataScope: 'all' } }).then(r => r.data.id);
+  const salesId = await mk('xs@corp.cn', '销售小周', 'sales'), mgrId = await mk('jl@corp.cn', '经理老吴', 'manager');
+  // 经理通过企业微信扫码绑定（userid=WuJL），销售通过钉钉扫码绑定（unionId，userid 需反查）
+  const bindVia = async (email, provider, register) => {
+    const c = await s.login(email, 'Password!12345');
+    const start = new URL((await fetch(`${s.base}/api/sso/${provider}/start?bind=1`, { redirect: 'manual', headers: { Cookie: c } })).headers.get('location'));
+    const code = 'bind-' + email; register(code);
+    await fetch(`${s.base}/api/sso/${provider}/callback?${provider === 'dingtalk' ? 'authCode' : 'code'}=${code}&state=${start.searchParams.get('state')}`, { redirect: 'manual' });
+    return c;
+  };
+  api.wecomUsers.set('WuJL', { name: '经理老吴' });
+  await bindVia('jl@corp.cn', 'wecom', code => api.wecomCodes.set(code, { userid: 'WuJL' }));
+  api.ddUnion.set('union-zhou', 'zhou01');
+  const sc = await bindVia('xs@corp.cn', 'dingtalk', code => api.dingCodes.set(code, { corpId: 'ding-corp', user: { unionId: 'union-zhou', nick: '销售小周' } }));
+  // 销售提交审批 → 经理收到企业微信文本卡片（含详情链接）
+  const acc = (await s.req('/accounts', { method: 'POST', body: { name: '通知客户' }, cookie: sc })).data.item;
+  const c = (await s.req('/contracts', { method: 'POST', body: { name: '通知合同', accountId: acc.id, amount: 8800, status: '审批中' }, cookie: sc })).data.item;
+  await flush();
+  const wm = api.wecomMessages.at(-1);
+  assert.equal(wm.touser, 'WuJL'); assert.equal(wm.msgtype, 'textcard'); assert.equal(wm.agentid, 1000002);
+  assert.match(wm.textcard.title, /合同待审批/); assert.match(wm.textcard.description, /通知合同/);
+  assert.match(wm.textcard.url, /^https:\/\/crm\.example\.com\/#\/contracts\?q=HT/);
+  // 经理审批 → 销售收到钉钉工作通知（unionId 反查 userid 并缓存）
+  const mc = await s.login('jl@corp.cn', 'Password!12345');
+  await s.req(`/contracts/${c.id}/approve`, { method: 'POST', body: { approved: true, note: '同意' }, cookie: mc });
+  await flush();
+  const dn = api.ddNotices.at(-1);
+  assert.equal(dn.userid_list, 'zhou01'); assert.equal(dn.msg.msgtype, 'action_card');
+  assert.match(dn.msg.action_card.markdown, /合同审批通过/); assert.match(dn.msg.action_card.markdown, /意见：同意/);
+  api.ddUnion.delete('union-zhou'); // 第二次不再反查（已缓存）
+  // 分配 → 新负责人收到；成员关闭工作通知后不再发送
+  const lead = (await s.req('/leads', { method: 'POST', body: { name: '通知线索' } })).data.item;
+  await s.req('/leads/' + lead.id, { method: 'PATCH', body: { ownerId: salesId } });
+  await flush();
+  assert.match(api.ddNotices.at(-1).msg.action_card.markdown, /通知线索/);
+  await s.req('/me', { method: 'PATCH', body: { imNotify: false }, cookie: sc });
+  const before = api.ddNotices.length;
+  await s.req('/leads/' + lead.id, { method: 'PATCH', body: { ownerId: mgrId } });
+  await s.req('/leads/' + lead.id, { method: 'PATCH', body: { ownerId: salesId } });
+  await flush();
+  assert.equal(api.ddNotices.length, before, '已关闭工作通知');
+  assert.equal(api.wecomMessages.at(-1).touser, 'WuJL', '分配给经理时经理收到企业微信消息');
+  // 事件过滤：关闭企业微信的“分配”事件
+  await s.req('/settings', { method: 'PUT', body: { wecom: { notifyEvents: ['approval', 'digest'] } } });
+  const wBefore = api.wecomMessages.length;
+  await s.req('/leads/' + lead.id, { method: 'PATCH', body: { ownerId: mgrId } });
+  await flush();
+  assert.equal(api.wecomMessages.length, wBefore);
+  // 每日摘要（未启用邮件也可仅经工作通知发送）
+  const d = new Date(), today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  await s.req('/tasks', { method: 'POST', body: { title: '今天回访', dueDate: today }, cookie: mc });
+  const sent = (await s.req('/settings/digest-now', { method: 'POST' })).data.sent;
+  assert.ok(sent >= 1);
+  assert.match(api.wecomMessages.at(-1).textcard.description, /今天回访/);
+  // 测试消息：管理员未绑定时提示
+  const tm = await s.req('/settings/im-test', { method: 'POST', body: { provider: 'wecom' } });
+  assert.equal(tm.status, 400); assert.match(tm.data.error, /尚未绑定/);
+});
+
+test('login returns to the requested page (safe next only)', async t => {
+  const api = await mockOpenApi();
+  const s = await startServer({ env: { WECOM_API_BASE: api.base } });
+  t.after(async () => { await s.stop(); api.close(); });
+  await s.req('/settings', { method: 'PUT', body: { wecom: { enabled: true, corpId: 'ww123', agentId: '1000002', secret: 'wecom-secret' } } });
+  await s.req('/users', { method: 'POST', body: { email: 'n@corp.cn', name: 'N', password: 'Password!12345', role: 'sales' } });
+  api.wecomUsers.set('N1', { name: 'N', email: 'n@corp.cn' });
+  const run = async next => {
+    const start = new URL((await fetch(`${s.base}/api/sso/wecom/start?next=${encodeURIComponent(next)}`, { redirect: 'manual' })).headers.get('location'));
+    const code = 'n' + Math.random(); api.wecomCodes.set(code, { userid: 'N1' });
+    return (await fetch(`${s.base}/api/sso/wecom/callback?code=${code}&state=${start.searchParams.get('state')}`, { redirect: 'manual' })).headers.get('location');
+  };
+  assert.equal(await run('#/contracts?q=HT2026001'), '/#/contracts?q=HT2026001');
+  for (const evil of ['https://evil.example', '//evil.example', '#/x"><script>', 'javascript:alert(1)']) assert.equal(await run(evil), '/#/dashboard', evil);
+});
