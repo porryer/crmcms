@@ -406,6 +406,7 @@ function sanitize(type, obj, existing = {}, u = null) {
     }
     const legacy = LEGACY[type]?.[field]?.[v];
     if (legacy) v = legacy;
+    if (def.enums?.[field] && v === '') v = existing[field] ?? def.defaults[field] ?? v;
     if (def.enums?.[field] && !def.enums[field].includes(v)) boom(400, `${LABELS[field] || field} 取值无效：${v}`);
     data[field] = v;
   }

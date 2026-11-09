@@ -92,3 +92,12 @@ test('list items carry related names; lookup respects data scope', async t => {
   assert.equal((await s.req('/lookup?type=accounts', { cookie: xc })).data.items.length, 0);
   assert.equal((await s.req(`/lookup?type=accounts&ids=${a.id}`, { cookie: xc })).data.items.length, 0);
 });
+
+test('empty enum value from form falls back to default (regression)', async t => {
+  const s = await startServer(); t.after(() => s.stop());
+  const a = (await s.req('/accounts', { method: 'POST', body: { name: 'A' } })).data.item;
+  const o = (await s.req('/opportunities', { method: 'POST', body: { name: 'O', accountId: a.id, stage: '' } })).data.item;
+  assert.equal(o.stage, '初步沟通');
+  await s.req('/opportunities/' + o.id, { method: 'PATCH', body: { stage: '方案报价' } });
+  assert.equal((await s.req('/opportunities/' + o.id, { method: 'PATCH', body: { stage: '' } })).data.item.stage, '方案报价');
+});

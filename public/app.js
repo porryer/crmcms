@@ -578,7 +578,7 @@ function fieldControl(type, field, record) {
       : canManage() ? CONTRACT_STATUS.filter(s => ['草稿', '审批中', '已作废'].includes(s) || s === v || (signed.includes(v) && signed.includes(s)))
         : CONTRACT_STATUS.filter(s => ['草稿', '审批中'].includes(s) || s === v);
     input = `<select class="field" name="${key}">${opts.map(o => `<option ${o === (v || '草稿') ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
-  } else if (Array.isArray(kind) || kind.startsWith('dict:')) input = `<select class="field" name="${key}">${optionList(kind, v, required ? false : '请选择')}</select>`;
+  } else if (Array.isArray(kind) || kind.startsWith('dict:')) input = `<select class="field" name="${key}">${optionList(kind, v, required || (Array.isArray(kind) && FORMS[type]?.some(f => f[0] === key)) ? false : '请选择')}</select>`;
   else if (kind === 'money') input = `<input class="field" type="number" name="${key}" step="0.01" min="0" max="1000000000000" value="${esc(v)}" ${req} inputmode="decimal">`;
   else if (kind === 'percent') input = `<input class="field" type="number" name="${key}" step="1" min="0" max="100" value="${esc(v)}">`;
   else if (kind === 'datetime') input = `<input class="field" type="datetime-local" name="${key}" value="${esc(String(v).slice(0, 16))}">`;

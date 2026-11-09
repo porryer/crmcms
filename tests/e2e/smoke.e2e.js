@@ -15,6 +15,7 @@ test('end-to-end smoke', { timeout: 180000 }, async t => {
   t.after(async () => { await browser.close(); await s.stop(); });
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   const page = await ctx.newPage();
+  page.setDefaultTimeout(10000);
   const problems = [];
   page.on('pageerror', e => problems.push('pageerror: ' + e.message));
   page.on('console', m => { if (m.type() === 'error' && !/401 \(Unauthorized\)/.test(m.text())) problems.push('console: ' + m.text()); });
@@ -42,7 +43,7 @@ test('end-to-end smoke', { timeout: 180000 }, async t => {
     await page.click('td a.link:has-text("端到端科技")'); await settle();
     await page.click('[data-tab=contacts]'); await settle();
     await page.click('button[data-act=create][data-type=contacts]');
-    await page.waitForSelector('dialog select[name=accountId] option:checked:has-text("端到端科技")');
+    await page.waitForSelector('dialog select[name=accountId] option:checked:has-text("端到端科技")', { state: 'attached' });
     await page.fill('dialog [name=name]', '王经理');
     await page.click('dialog button[type=submit]'); await settle();
     await page.waitForSelector('td:has-text("王经理")');
@@ -79,7 +80,7 @@ test('end-to-end smoke', { timeout: 180000 }, async t => {
     await page.click('dialog button[type=submit]'); await settle();
     await page.waitForSelector('td .tag:has-text("已签订")');
     await page.click('button[data-act=pay-contract]');
-    await page.waitForSelector('dialog select[name=contractId] option:checked');
+    await page.waitForFunction(() => document.querySelector('dialog select[name=contractId]')?.value);
     await page.fill('dialog [name=amount]', '30000');
     await page.click('dialog button[type=submit]'); await settle();
     const fin = (await s.req('/finance')).data.totals;
@@ -113,6 +114,23 @@ test('end-to-end smoke', { timeout: 180000 }, async t => {
     await page.click('[data-act=notif]'); await page.waitForSelector('#notifPanel:not([hidden])');
   });
 
+  await t.test('two-step login with TOTP', async () => {
+    const TOTP = require('../../lib/totp');
+    await s.req('/users', { method: 'POST', body: { email: 'mfa@x.cn', name: 'MFA', password: 'Password!12345', role: 'sales' } });
+    const c = await s.login('mfa@x.cn', 'Password!12345');
+    const { secret } = (await s.req('/mfa/setup', { method: 'POST', cookie: c })).data;
+    await s.req('/mfa/enable', { method: 'POST', body: { code: TOTP.totp(secret, Date.now() - 30000) }, cookie: c });
+    const ctx2 = await browser.newContext(); const p2 = await ctx2.newPage();
+    await p2.goto(B + '/');
+    await p2.fill('[name=email]', 'mfa@x.cn'); await p2.fill('[name=password]', 'Password!12345');
+    await p2.click('#loginForm button[type=submit]');
+    await p2.waitForSelector('[name=otp]');
+    await p2.fill('[name=otp]', TOTP.totp(secret));
+    await p2.click('#loginForm button[type=submit]');
+    await p2.waitForSelector('.kpis');
+    await ctx2.close();
+  });
+
   await t.test('mobile layout', async () => {
     const m = await browser.newContext({ ...devices['iPhone 13'] });
     const mp = await m.newPage();
@@ -121,7 +139,10 @@ test('end-to-end smoke', { timeout: 180000 }, async t => {
     await mp.fill('[name=email]', 'admin@local.crm'); await mp.fill('[name=password]', 'TestPassword!1234');
     await mp.click('#loginForm button[type=submit]'); await mp.waitForSelector('.kpis');
     assert.ok(await mp.isVisible('.tabbar'));
-    assert.ok(!(await mp.isVisible('.aside')));
+    const box = await mp.locator('.aside').boundingBox();
+    assert.ok(box.x + box.width <= 1, '侧栏默认收起在屏幕外');
+    await mp.click('.tabbar [data-act=toggle-nav]');
+    await mp.waitForFunction(() => document.querySelector('.aside').getBoundingClientRect().x >= 0);
     await m.close();
   });
 

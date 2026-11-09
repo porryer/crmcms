@@ -14,6 +14,6 @@
     "check": "node --check server.js && node --check public/app.js && for f in lib/*.js scripts/*.js; do node --check $f || exit 1; done",
     "backup": "node scripts/backup.js",
     "seed": "node scripts/seed.js",
-    "e2e": "node --test --test-concurrency=1 tests/e2e/"
+    "e2e": "node --test --test-concurrency=1 tests/e2e/*.e2e.js"
   }
 }
