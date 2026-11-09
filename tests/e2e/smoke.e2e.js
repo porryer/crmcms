@@ -120,20 +120,29 @@ test('end-to-end smoke', { timeout: 180000 }, async t => {
     await page.click('[data-act=notif]'); await page.waitForSelector('#notifPanel:not([hidden])');
   });
 
-  await t.test('two-step login with TOTP', async () => {
+  await t.test('two-step verification: enrol via UI (QR), then two-step login', async () => {
     const TOTP = require('../../lib/totp');
     await s.req('/users', { method: 'POST', body: { email: 'mfa@x.cn', name: 'MFA', password: 'Password!12345', role: 'sales' } });
-    const c = await s.login('mfa@x.cn', 'Password!12345');
-    const { secret } = (await s.req('/mfa/setup', { method: 'POST', cookie: c })).data;
-    await s.req('/mfa/enable', { method: 'POST', body: { code: TOTP.totp(secret, Date.now() - 30000) }, cookie: c });
     const ctx2 = await browser.newContext(); const p2 = await ctx2.newPage();
-    await p2.goto(B + '/');
-    await p2.fill('[name=email]', 'mfa@x.cn'); await p2.fill('[name=password]', 'Password!12345');
-    await p2.click('#loginForm button[type=submit]');
-    await p2.waitForSelector('[name=otp]');
-    await p2.fill('[name=otp]', TOTP.totp(secret));
-    await p2.click('#loginForm button[type=submit]');
-    await p2.waitForSelector('.kpis');
+    p2.on('pageerror', e => problems.push('mfa pageerror: ' + e.message));
+    const login = async otp => {
+      await p2.goto(B + '/');
+      await p2.fill('[name=email]', 'mfa@x.cn'); await p2.fill('[name=password]', 'Password!12345');
+      await p2.click('#loginForm button[type=submit]');
+      if (otp) { await p2.waitForSelector('[name=otp]'); await p2.fill('[name=otp]', otp()); await p2.click('#loginForm button[type=submit]'); }
+      await p2.waitForSelector('.kpis');
+    };
+    await login();
+    await p2.click('[data-act=user-menu]'); await p2.click('[data-act=mfa]');
+    assert.ok(!(await p2.isVisible('dialog button[type=submit]')), '开始设置前不显示提交按钮');
+    await p2.click('[data-act=mfa-start]');
+    await p2.waitForSelector('.mfa-setup .qr svg');
+    const secret = (await p2.textContent('.secret')).replace(/\s/g, '');
+    await p2.fill('dialog [name=code]', TOTP.totp(secret, Date.now() - 30000));
+    await p2.click('dialog button[type=submit]');
+    await waitFor(async () => (await s.req('/users')).data.items.find(x => x.email === 'mfa@x.cn').mfaEnabled === 1);
+    await p2.click('[data-act=user-menu]'); await p2.click('[data-act=logout]');
+    await login(() => TOTP.totp(secret));
     await ctx2.close();
   });
 

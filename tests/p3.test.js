@@ -145,3 +145,38 @@ test('email notifications via SMTP: approvals, assignment, opt-out, digest', asy
   // 非管理员看不到 SMTP 配置
   assert.deepEqual((await s.req('/settings', { cookie: sc })).data.settings.smtp, { enabled: true });
 });
+
+test('QR code encoder: structure, format info and versions (decoded externally with ZXing during development)', async t => {
+  const QR = require('../lib/qrcode');
+  const { dataCodewords } = QR._internal;
+  // 纠错等级 M 的数据码字数（ISO/IEC 18004 表 7、9：总码字 - 纠错码字）
+  assert.deepEqual([1, 2, 7, 8, 10, 40].map(v => dataCodewords(v)), [16, 28, 124, 154, 216, 2334]);
+  const sizeFor = n => QR.matrix('a'.repeat(n)).length;
+  assert.equal(sizeFor(14), 21); assert.equal(sizeFor(15), 25); assert.equal(sizeFor(150), 49);
+  const TOTP = require('../lib/totp');
+  for (const text of ['A', TOTP.otpauthUri(TOTP.generateSecret(), 'admin@local.crm', 'NovaCRM'), '中文 ✓'.repeat(40)]) {
+    const m = QR.matrix(text), n = m.length;
+    // 三个定位图形中心 3x3 为深色、外圈第 2 层为浅色
+    for (const [cx, cy] of [[3, 3], [n - 4, 3], [3, n - 4]]) { assert.equal(m[cy][cx], true); assert.equal(m[cy - 2][cx], false); assert.equal(m[cy - 3][cx], true); }
+    for (let i = 8; i < n - 8; i++) { assert.equal(m[6][i], i % 2 === 0); assert.equal(m[i][6], i % 2 === 0); }
+    // 两份格式信息一致，BCH 校验有效，纠错等级为 M（00）
+    const bitsA = [0, 1, 2, 3, 4, 5, 7, 8].map(i => m[i][8]).concat([7, 5, 4, 3, 2, 1, 0].map(i => m[8][i]));
+    const bitsB = Array.from({ length: 8 }, (_, i) => m[8][n - 1 - i]).concat(Array.from({ length: 7 }, (_, i) => m[n - 7 + i][8]));
+    assert.deepEqual(bitsA, bitsB);
+    const fmt = bitsA.reduce((a, b, i) => a | ((b ? 1 : 0) << i), 0) ^ 0x5412;
+    let rem = fmt >>> 10; for (let i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >>> 9) * 0x537);
+    assert.equal(rem & 0x3ff, fmt & 0x3ff, 'BCH 校验');
+    assert.equal(fmt >>> 13, 0, '纠错等级 M');
+    assert.equal(m[n - 8][8], true, '固定深色模块');
+    if (n >= 45) { // 版本 ≥7 的版本信息
+      const ver = (n - 17) / 4;
+      const vb = Array.from({ length: 18 }, (_, i) => (m[Math.floor(i / 3)][n - 11 + (i % 3)] ? 1 : 0) << i).reduce((a, b) => a | b, 0);
+      assert.equal(vb >>> 12, ver);
+    }
+  }
+  const svg = QR.toSvg('hello');
+  assert.match(svg, /^<svg[^>]+viewBox="0 0 29 29"/); assert.doesNotMatch(svg, /hello/);
+  // MFA 接口返回二维码
+  const s = await startServer(); t.after(() => s.stop());
+  assert.match((await s.req('/mfa/setup', { method: 'POST' })).data.qrSvg, /^<svg/);
+});

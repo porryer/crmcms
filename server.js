@@ -13,6 +13,7 @@ const CSV = require('./lib/csv');
 const TOTP = require('./lib/totp');
 const XLSX = require('./lib/xlsx');
 const SMTP = require('./lib/smtp');
+const QR = require('./lib/qrcode');
 
 const VERSION = '1.2.0';
 const PORT = Number(process.env.PORT || 3100);
@@ -1347,7 +1348,8 @@ async function api(req, res, url) {
     if (u.totp_enabled) boom(409, '已启用两步验证');
     const secret = TOTP.generateSecret();
     db.prepare('UPDATE users SET totp_secret=? WHERE id=?').run(secret, u.id);
-    return send(res, 200, { secret, uri: TOTP.otpauthUri(secret, u.email, getSettings(u.tenant_id).systemName) });
+    const uri = TOTP.otpauthUri(secret, u.email, getSettings(u.tenant_id).systemName);
+    return send(res, 200, { secret, uri, qrSvg: QR.toSvg(uri, { scale: 4 }) });
   }
   if (p === '/api/mfa/enable' && m === 'POST') {
     const b = await readBody(req);

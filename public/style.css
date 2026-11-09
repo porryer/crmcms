@@ -11,6 +11,7 @@
   color: var(--text); font-size: 14px; -webkit-font-smoothing: antialiased;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--text); }
 button, input, select, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; }
@@ -487,3 +488,7 @@ code.wrap { display: block; white-space: pre-wrap; word-break: break-all; margin
 .btn-group { display: inline-flex; }
 .btn-group .btn:first-child { border-radius: 8px 0 0 8px; }
 .btn-group .btn + .btn { border-radius: 0 8px 8px 0; border-left: 0; padding-left: 10px; padding-right: 10px; }
+.mfa-setup { display: flex; gap: 18px; align-items: flex-start; flex-wrap: wrap; }
+.mfa-setup .qr { flex: 0 0 auto; border: 1px solid var(--line); border-radius: 10px; padding: 6px; background: #fff; }
+.mfa-setup .qr svg { display: block; width: 180px; height: 180px; }
+.mfa-setup .howto { flex: 1; min-width: 220px; }

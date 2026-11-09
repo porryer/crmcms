@@ -1299,14 +1299,14 @@ const ACTIONS = {
   mfa: () => mfaModal(),
   'mfa-start': async t => {
     const r = await API.post('/mfa/setup');
-    const box = t.closest('.modal-body');
-    box.innerHTML = `<ol class="howto"><li>在手机上打开身份验证器 App（Google/Microsoft Authenticator、腾讯身份验证器等），选择“手动输入密钥”。</li>
-      <li>账号填写 <b>${esc(me.email)}</b>，密钥填写：<div class="secret">${esc(r.secret.match(/.{1,4}/g).join(' '))}</div>类型选“基于时间”。</li>
-      <li>输入 App 中显示的 6 位动态码完成绑定。</li></ol>
-      <details><summary class="muted small">otpauth 链接（可用其他工具生成二维码）</summary><code class="wrap">${esc(r.uri)}</code></details>
+    const dlg = t.closest('dialog'), box = t.closest('.modal-body');
+    // qrSvg 由服务端生成（仅含路径数据，不含用户输入的标记）
+    box.innerHTML = `<div class="mfa-setup"><div class="qr">${r.qrSvg}</div><ol class="howto"><li>在手机上打开身份验证器 App（Google/Microsoft Authenticator、腾讯身份验证器等），<b>扫描左侧二维码</b>。</li>
+      <li>无法扫码时选择“手动输入密钥”：账号 <b>${esc(me.email)}</b>，密钥：<div class="secret">${esc(r.secret.match(/.{1,4}/g).join(' '))}</div>类型选“基于时间”。</li>
+      <li>输入 App 中显示的 6 位动态码完成绑定。</li></ol></div>
       <label class="fld wide"><span>动态码</span><input class="field" name="code" inputmode="numeric" maxlength="6" required autocomplete="one-time-code"></label>`;
-    const dlg = t.closest('dialog'); dlg.dataset.mode = 'enable';
     dlg.querySelector('[type=submit]').hidden = false;
+    box.querySelector('[name=code]').focus();
   },
   'user-mfa-reset': async t => {
     const u = R.users.find(x => x.id === t.dataset.id);
