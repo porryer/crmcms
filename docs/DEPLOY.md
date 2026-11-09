@@ -31,6 +31,9 @@ docker compose logs crm      # 首次启动信息
 | `TRUST_PROXY` | 0 | 位于反向代理之后设为 1 |
 | `BACKUP_INTERVAL_HOURS` | 24 | 自动备份间隔，0 关闭 |
 | `BACKUP_KEEP` | 14 | 保留快照份数 |
+| `DIGEST_TIME` | 08:30 | 每日待办摘要邮件发送时间（需在系统设置中启用 SMTP） |
+| `ACCESS_LOG` | 镜像中为 1 | JSON 行访问日志 |
+| `ATTACH_MAX_MB` | 20 | 单个附件大小上限 |
 
 ## 3. 备份
 

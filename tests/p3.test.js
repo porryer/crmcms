@@ -53,3 +53,95 @@ test('xlsx import (file produced by openpyxl), xlsx template and export', async 
   const rows = XLSX.readRows(Buffer.from(await ex.arrayBuffer()));
   assert.ok(rows[0].includes('名称')); assert.ok(rows.some(r => r.includes('表格导入制造')));
 });
+
+/** 极简 SMTP 测试服务器：记录 AUTH、收件人与解码后的主题/正文 */
+function fakeSmtp() {
+  const net = require('node:net');
+  const mails = [], auths = [];
+  const server = net.createServer(sock => {
+    let buf = '', inData = false, cur = null;
+    sock.write('220 fake ESMTP\r\n');
+    sock.on('data', d => {
+      buf += d.toString();
+      let i;
+      while ((i = buf.indexOf('\r\n')) >= 0) {
+        const line = buf.slice(0, i); buf = buf.slice(i + 2);
+        if (inData) {
+          if (line === '.') {
+            inData = false;
+            const raw = cur.data.join('\r\n');
+            const subj = (raw.match(/^Subject: (.*)$/m) || [])[1] || '';
+            const subject = subj.replace(/=\?UTF-8\?B\?([^?]+)\?=/g, (_, b) => Buffer.from(b, 'base64').toString());
+            const texts = [...raw.matchAll(/Content-Type: text\/(plain|html); charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n([\s\S]*?)(?:\r\n--|$)/g)].map(m => Buffer.from(m[2].replace(/\s/g, ''), 'base64').toString());
+            mails.push({ ...cur, subject, text: texts[0] || '', html: texts[1] || '' });
+            sock.write('250 queued\r\n');
+          } else cur.data.push(line.startsWith('..') ? line.slice(1) : line);
+          continue;
+        }
+        if (/^EHLO/.test(line)) sock.write('250-fake\r\n250 AUTH PLAIN LOGIN\r\n');
+        else if (/^AUTH PLAIN/.test(line)) { auths.push(Buffer.from(line.slice(11), 'base64').toString().split('\0')); sock.write('235 ok\r\n'); }
+        else if (/^MAIL FROM/.test(line)) { cur = { from: line, to: [], data: [] }; sock.write('250 ok\r\n'); }
+        else if (/^RCPT TO:<(.+)>/.test(line)) { cur.to.push(line.match(/<(.+)>/)[1]); sock.write('250 ok\r\n'); }
+        else if (line === 'DATA') { inData = true; sock.write('354 go\r\n'); }
+        else if (line === 'QUIT') { sock.write('221 bye\r\n'); sock.end(); }
+        else sock.write('250 ok\r\n');
+      }
+    });
+    sock.on('error', () => {});
+  });
+  return new Promise(r => server.listen(0, '127.0.0.1', () => r({ server, port: server.address().port, mails, auths })));
+}
+const until = async (fn, ms = 3000) => { const end = Date.now() + ms; while (Date.now() < end) { if (fn()) return; await new Promise(r => setTimeout(r, 30)); } };
+
+test('email notifications via SMTP: approvals, assignment, opt-out, digest', async t => {
+  const smtp = await fakeSmtp();
+  const s = await startServer({ env: { PUBLIC_ORIGIN: 'https://crm.example.com' } });
+  t.after(async () => { await s.stop(); smtp.server.close(); });
+  const bad = await s.req('/settings', { method: 'PUT', body: { smtp: { enabled: true, host: '', from: 'x' } } });
+  assert.equal(bad.status, 400);
+  const st = (await s.req('/settings', { method: 'PUT', body: { smtp: { enabled: true, host: '127.0.0.1', port: smtp.port, secure: 'none', user: 'robot', pass: 's3cret', from: 'NovaCRM 通知 <crm@example.com>' } } })).data.settings;
+  assert.equal(st.smtp.pass, ''); assert.equal(st.smtp.passSet, true, '密码不回传');
+  // 测试邮件
+  const tm = await s.req('/settings/smtp-test', { method: 'POST' });
+  assert.equal(tm.status, 200);
+  assert.deepEqual(smtp.auths[0], ['', 'robot', 's3cret']);
+  assert.match(smtp.mails[0].subject, /测试邮件/); assert.deepEqual(smtp.mails[0].to, ['admin@local.crm']);
+  // 成员
+  const mk = (email, name, role) => s.req('/users', { method: 'POST', body: { email, name, password: 'Password!12345', role, dataScope: 'all' } }).then(r => r.data.id);
+  const salesId = await mk('sales1@x.cn', '小销', 'sales'), mgr1 = await mk('mgr1@x.cn', '经理一', 'manager'), mgr2 = await mk('mgr2@x.cn', '经理二', 'manager');
+  const sc = await s.login('sales1@x.cn', 'Password!12345');
+  // 经理二关闭邮件通知
+  const m2c = await s.login('mgr2@x.cn', 'Password!12345');
+  assert.equal((await s.req('/me', { method: 'PATCH', body: { emailNotify: false }, cookie: m2c })).data.user.emailNotify, false);
+  // 提交审批 → 只发给经理一
+  const acc = (await s.req('/accounts', { method: 'POST', body: { name: '邮件客户' }, cookie: sc })).data.item;
+  const c = (await s.req('/contracts', { method: 'POST', body: { name: '邮件合同', accountId: acc.id, amount: 1000, status: '审批中' }, cookie: sc })).data.item;
+  await until(() => smtp.mails.length >= 2);
+  const pending = smtp.mails[1];
+  assert.deepEqual(pending.to, ['mgr1@x.cn']);
+  assert.match(pending.subject, /合同待审批/); assert.match(pending.text, /邮件合同/);
+  assert.match(pending.html, /https:\/\/crm\.example\.com\/#\/contracts/);
+  // 审批通过 → 通知提交人
+  await s.req(`/contracts/${c.id}/approve`, { method: 'POST', body: { approved: true, note: '同意' }, cookie: await s.login('mgr1@x.cn', 'Password!12345') });
+  await until(() => smtp.mails.length >= 3);
+  assert.deepEqual(smtp.mails[2].to, ['sales1@x.cn']); assert.match(smtp.mails[2].text, /意见：同意/);
+  // 分配 → 通知新负责人
+  const lead = (await s.req('/leads', { method: 'POST', body: { name: '线索甲' } })).data.item;
+  await s.req('/leads/' + lead.id, { method: 'PATCH', body: { ownerId: salesId } });
+  await until(() => smtp.mails.length >= 4);
+  assert.deepEqual(smtp.mails[3].to, ['sales1@x.cn']); assert.match(smtp.mails[3].text, /线索甲/);
+  // 关闭通知的经理二收不到；分配给他不发邮件
+  await s.req('/leads/' + lead.id, { method: 'PATCH', body: { ownerId: mgr2 } });
+  await new Promise(r => setTimeout(r, 300));
+  assert.ok(!smtp.mails.some(m => m.to.includes('mgr2@x.cn')));
+  // 每日摘要：小销有今日到期任务
+  const d = new Date(), today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  await s.req('/tasks', { method: 'POST', body: { title: '今天要打的电话', dueDate: today }, cookie: sc });
+  const before = smtp.mails.length;
+  const dg = (await s.req('/settings/digest-now', { method: 'POST' })).data;
+  assert.ok(dg.sent >= 1);
+  const digest = smtp.mails.slice(before).find(m => m.to[0] === 'sales1@x.cn');
+  assert.match(digest.subject, /今日待办提醒/); assert.match(digest.text, /今天要打的电话/);
+  // 非管理员看不到 SMTP 配置
+  assert.deepEqual((await s.req('/settings', { cookie: sc })).data.settings.smtp, { enabled: true });
+});

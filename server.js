@@ -12,6 +12,7 @@ const backups = require('./lib/backup');
 const CSV = require('./lib/csv');
 const TOTP = require('./lib/totp');
 const XLSX = require('./lib/xlsx');
+const SMTP = require('./lib/smtp');
 
 const VERSION = '1.2.0';
 const PORT = Number(process.env.PORT || 3100);
@@ -47,6 +48,8 @@ addColumn('users', 'totp_secret', "totp_secret TEXT NOT NULL DEFAULT ''");
 addColumn('users', 'totp_enabled', 'totp_enabled INTEGER NOT NULL DEFAULT 0');
 addColumn('users', 'totp_last_step', 'totp_last_step INTEGER NOT NULL DEFAULT 0');
 db.exec('CREATE TABLE IF NOT EXISTS login_failures(key TEXT PRIMARY KEY,first_at INTEGER NOT NULL,count INTEGER NOT NULL)');
+db.exec('CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)');
+addColumn('users', 'email_notify', 'email_notify INTEGER NOT NULL DEFAULT 1');
 db.exec(`CREATE TABLE IF NOT EXISTS attachments(id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,entity TEXT NOT NULL,entity_id TEXT NOT NULL,name TEXT NOT NULL,mime TEXT NOT NULL,size INTEGER NOT NULL,sha256 TEXT NOT NULL,created_by TEXT NOT NULL,created_at TEXT NOT NULL,deleted INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS idx_attach_entity ON attachments(tenant_id,entity,entity_id,deleted);`);
 db.exec(`
@@ -98,6 +101,8 @@ const DEFAULT_SETTINGS = {
   approval: { levels: [{ name: '销售经理审批', role: 'manager', minAmount: 0 }] },
   /** 群机器人通知：kind = wecom | dingtalk | generic */
   webhook: { url: '', kind: 'wecom', events: ['approval', 'assign'] },
+  /** 邮件通知（SMTP） */
+  smtp: { enabled: false, host: '', port: 465, secure: 'ssl', user: '', pass: '', from: '', events: ['approval', 'assign', 'digest'] },
   logo: '',
 };
 const CUSTOM_FIELD_TYPES = ['text', 'textarea', 'number', 'date', 'select'];
@@ -279,7 +284,7 @@ function audit(u, action, entity, entityId, details = {}) {
 }
 function httpError(status, message) { const e = new Error(message); e.status = status; return e; }
 function boom(status, message) { throw httpError(status, message); }
-const publicUser = u => ({ id: u.id, tenantId: u.tenant_id, name: u.display_name, email: u.email, role: u.role, department: u.department || '', mfaEnabled: !!u.totp_enabled });
+const publicUser = u => ({ id: u.id, tenantId: u.tenant_id, name: u.display_name, email: u.email, role: u.role, department: u.department || '', mfaEnabled: !!u.totp_enabled, emailNotify: u.email_notify !== 0 });
 const canWrite = u => ['admin', 'manager', 'sales'].includes(u.role);
 const canManage = u => ['admin', 'manager'].includes(u.role);
 const canDelete = canManage;
@@ -299,12 +304,14 @@ function getSettings(tenantId) {
     dicts: { ...DEFAULT_SETTINGS.dicts, ...(s.dicts || {}) },
     customFields: s.customFields || {}, approval: s.approval?.levels?.length ? s.approval : DEFAULT_SETTINGS.approval,
     webhook: { ...DEFAULT_SETTINGS.webhook, ...(s.webhook || {}) },
+    smtp: { ...DEFAULT_SETTINGS.smtp, ...(s.smtp || {}) },
   };
 }
 /** 返回给前端的设置：Webhook 地址含密钥，仅管理员可见 */
 function publicSettings(u) {
   const st = getSettings(u.tenant_id);
-  if (u.role !== 'admin') st.webhook = { configured: !!st.webhook.url };
+  if (u.role !== 'admin') { st.webhook = { configured: !!st.webhook.url }; st.smtp = { enabled: !!st.smtp.enabled }; }
+  else st.smtp = { ...st.smtp, pass: '', passSet: !!st.smtp.pass };
   return st;
 }
 const customFieldsOf = (u, type) => (u ? getSettings(u.tenant_id).customFields?.[type] || [] : []);
@@ -895,9 +902,69 @@ function accountOverview(u, accountId) {
   };
 }
 
+// ---------- 邮件通知 ----------
+const publicOrigin = () => String(process.env.PUBLIC_ORIGIN || '').split(',')[0].trim().replace(/\/$/, '');
+const escHtml = x => String(x ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+function mailBody(st, title, lines, link) {
+  const url = link && publicOrigin() ? publicOrigin() + '/' + link : '';
+  const text = [title, '', ...lines, ...(url ? ['', '查看详情：' + url] : []), '', `—— ${st.systemName}（自动通知，可在个人菜单中关闭邮件通知）`].join('\n');
+  const html = `<div style="font-family:'PingFang SC','Microsoft YaHei',sans-serif;max-width:560px;color:#1b2437"><h3 style="color:#1f6bff;margin:0 0 12px">${escHtml(title)}</h3>${lines.map(l => `<p style="margin:4px 0">${escHtml(l)}</p>`).join('')}${url ? `<p style="margin:18px 0"><a href="${escHtml(url)}" style="background:#1f6bff;color:#fff;padding:8px 16px;border-radius:6px;text-decoration:none">查看详情</a></p>` : ''}<p style="color:#8a96ab;font-size:12px;margin-top:24px">${escHtml(st.systemName)} 自动通知 · 可在个人菜单中关闭邮件通知</p></div>`;
+  return { text, html };
+}
+/** 向指定成员发送邮件（异步，失败仅记录日志）；返回 Promise 便于测试等待 */
+function notifyEmail(u, event, userIds, title, lines, link = '') {
+  const st = getSettings(u.tenant_id), cfg = st.smtp;
+  if (!cfg.enabled || !cfg.host || !(cfg.events || []).includes(event)) return Promise.resolve(0);
+  const ids = [...new Set(userIds.filter(Boolean))];
+  if (!ids.length) return Promise.resolve(0);
+  const users = db.prepare(`SELECT email FROM users WHERE tenant_id=? AND active=1 AND email_notify=1 AND id IN (${ids.map(() => '?').join(',')})`).all(u.tenant_id, ...ids);
+  if (!users.length) return Promise.resolve(0);
+  const { text, html } = mailBody(st, title, lines, link);
+  const job = Promise.all(users.map(x => SMTP.sendMail(cfg, { to: [x.email], subject: `[${st.systemName}] ${title}`, text, html })
+    .then(() => 1).catch(e => { logJson({ type: 'mail_error', event, to: x.email, message: e.message }); return 0; })))
+    .then(r => r.reduce((a, b) => a + b, 0));
+  pendingMail.add(job); job.finally(() => pendingMail.delete(job));
+  return job;
+}
+const pendingMail = new Set();
+/** 当前审批节点的审批人（不含提交人；管理员级别仅通知管理员） */
+function approverIds(u, c) {
+  const lv = currentLevel(c), role = lv?.role || 'manager';
+  let ids = db.prepare('SELECT id FROM users WHERE tenant_id=? AND active=1 AND role=?').all(u.tenant_id, role).map(x => x.id).filter(id => id !== c.submittedBy);
+  if (!ids.length) ids = db.prepare("SELECT id FROM users WHERE tenant_id=? AND active=1 AND role='admin'").all(u.tenant_id).map(x => x.id).filter(id => id !== c.submittedBy);
+  return ids;
+}
 function notifyApprovalPending(u, c) {
-  const lv = currentLevel(c);
-  notifyWebhook(u, 'approval', `合同待审批：${lv?.name || '审批'}`, [`${c.number} ${c.name}`, `金额：¥${c.amount}`, `提交人：${u.display_name}`]);
+  const lv = currentLevel(c), title = `合同待审批：${lv?.name || '审批'}`;
+  const lines = [`${c.number} ${c.name}`, `金额：¥${Number(c.amount).toLocaleString('zh-CN')}`, `提交人：${u.display_name}`];
+  notifyWebhook(u, 'approval', title, lines);
+  notifyEmail(u, 'approval', approverIds(u, c), title, lines, `#/contracts?q=${encodeURIComponent(c.number || '')}`);
+}
+function notifyAssign(u, type, ownerId, title, lines, link) {
+  notifyWebhook(u, 'assign', title, lines);
+  notifyEmail(u, 'assign', [ownerId], title, lines, link);
+}
+
+/** 每日摘要：每位成员的今日/逾期任务、即将到期回款计划、待审批合同 */
+async function sendDigests(force = false) {
+  const today = ymd(new Date());
+  let sent = 0;
+  for (const t of db.prepare('SELECT id FROM tenants').all()) {
+    const st = getSettings(t.id);
+    if (!st.smtp.enabled || !(st.smtp.events || []).includes('digest')) continue;
+    const key = `digest:${t.id}:${today}`;
+    if (!force && db.prepare('SELECT 1 FROM meta WHERE key=?').get(key)) continue;
+    db.prepare('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)').run(key, now());
+    for (const user of db.prepare('SELECT * FROM users WHERE tenant_id=? AND active=1 AND email_notify=1').all(t.id)) {
+      const n = notifications(user);
+      const todo = n.items.filter(x => ['task', 'approval', 'plan'].includes(x.type));
+      if (!todo.length) continue;
+      const lines = todo.slice(0, 20).map(x => `· ${x.title}：${x.text}`);
+      if (todo.length > 20) lines.push(`…另有 ${todo.length - 20} 项`);
+      sent += await notifyEmail(user, 'digest', [user.id], `今日待办提醒（${todo.length} 项）`, lines, '#/dashboard');
+    }
+  }
+  return sent;
 }
 function validateCustomFields(input, current = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) boom(400, '自定义字段格式错误');
@@ -1320,6 +1387,21 @@ async function api(req, res, url) {
       const next = { ...cur, systemName: text(b.systemName, cur.systemName), companyName: text(b.companyName, cur.companyName), dicts };
       if (b.customFields !== undefined) next.customFields = validateCustomFields(b.customFields, cur.customFields);
       if (b.approval !== undefined) next.approval = validateApproval(b.approval);
+      if (b.smtp !== undefined) {
+        const x = b.smtp || {}, c0 = cur.smtp;
+        const smtp = {
+          enabled: x.enabled !== undefined ? !!x.enabled : c0.enabled,
+          host: String(x.host ?? c0.host).trim().slice(0, 200), port: Number(x.port ?? c0.port) || 465,
+          secure: ['ssl', 'starttls', 'none'].includes(x.secure) ? x.secure : c0.secure,
+          user: String(x.user ?? c0.user).trim().slice(0, 200),
+          pass: x.pass ? String(x.pass).slice(0, 500) : (x.clearPass ? '' : c0.pass),
+          from: String(x.from ?? c0.from).trim().slice(0, 200),
+          events: Array.isArray(x.events) ? x.events.filter(e => ['approval', 'assign', 'digest'].includes(e)) : c0.events,
+        };
+        if (smtp.enabled && (!smtp.host || !/^[^\s@<>]+@[^\s@<>]+$/.test(String(smtp.from).replace(/^.*<|>$/g, '')))) boom(400, '启用邮件通知需填写 SMTP 服务器与有效的发件人地址');
+        if (smtp.port < 1 || smtp.port > 65535) boom(400, '端口无效');
+        next.smtp = smtp;
+      }
       if (b.webhook !== undefined) {
         const w = b.webhook || {};
         const url = String(w.url ?? cur.webhook.url).trim();
@@ -1327,7 +1409,7 @@ async function api(req, res, url) {
         next.webhook = { url, kind: ['wecom', 'dingtalk', 'generic'].includes(w.kind) ? w.kind : cur.webhook.kind, events: Array.isArray(w.events) ? w.events.filter(e => WEBHOOK_EVENTS.includes(e)) : cur.webhook.events };
       }
       db.prepare('UPDATE tenants SET settings=?,name=? WHERE id=?').run(JSON.stringify(next), next.companyName, u.tenant_id);
-      audit(u, 'update', 'settings', u.tenant_id, { before: { ...cur, webhook: { ...cur.webhook, url: cur.webhook.url ? '***' : '' } } });
+      audit(u, 'update', 'settings', u.tenant_id, { before: { ...cur, webhook: { ...cur.webhook, url: cur.webhook.url ? '***' : '' }, smtp: { ...cur.smtp, pass: cur.smtp.pass ? '***' : '' } } });
       return send(res, 200, { settings: publicSettings(u) });
     }
   }
@@ -1338,6 +1420,24 @@ async function api(req, res, url) {
     if (!w.url) boom(400, '请先保存 Webhook 地址');
     notifyWebhook(u, (w.events || [])[0] || 'approval', `${getSettings(u.tenant_id).systemName} 测试消息`, ['Webhook 配置成功', `发送人：${u.display_name}`]);
     return send(res, 200, { ok: true });
+  }
+  if (p === '/api/settings/smtp-test' && m === 'POST') {
+    if (u.role !== 'admin') boom(403, '仅管理员可操作');
+    const st = getSettings(u.tenant_id);
+    if (!st.smtp.host) boom(400, '请先保存 SMTP 配置');
+    const { text, html } = mailBody(st, '邮件通知配置成功', [`这是一封来自 ${st.systemName} 的测试邮件。`, `发送人：${u.display_name}`]);
+    try { await SMTP.sendMail(st.smtp, { to: [u.email], subject: `[${st.systemName}] 测试邮件`, text, html }); }
+    catch (e) { boom(400, `发送失败：${e.message}`); }
+    return send(res, 200, { ok: true, to: u.email });
+  }
+  if (p === '/api/settings/digest-now' && m === 'POST') {
+    if (u.role !== 'admin') boom(403, '仅管理员可操作');
+    return send(res, 200, { sent: await sendDigests(true) });
+  }
+  if (p === '/api/me' && m === 'PATCH') {
+    const b = await readBody(req);
+    if (b.emailNotify !== undefined) db.prepare('UPDATE users SET email_notify=? WHERE id=?').run(b.emailNotify ? 1 : 0, u.id);
+    return send(res, 200, { user: publicUser(db.prepare('SELECT * FROM users WHERE id=?').get(u.id)) });
   }
   if (p === '/api/settings/logo') {
     if (m === 'GET') {
@@ -1500,7 +1600,7 @@ async function api(req, res, url) {
           done.push(key);
         }
       });
-      if (done.length && target.id !== u.id) notifyWebhook(u, 'assign', `${TABLES[type].label}分配`, [`${done.length} 条${TABLES[type].label}已分配给 ${owner}`, `操作人：${u.display_name}`]);
+      if (done.length && target.id !== u.id) notifyAssign(u, type, target.id, `${TABLES[type].label}分配`, [`${done.length} 条${TABLES[type].label}已分配给 ${owner}`, `操作人：${u.display_name}`], `#/${type}`);
     } else boom(400, '不支持的批量操作');
     return send(res, 200, { done, failed });
   }
@@ -1569,7 +1669,12 @@ async function api(req, res, url) {
       }
       transaction(() => { updateRecord(u, recordId, next); audit(u, approved ? 'approve' : 'reject', 'contracts', recordId, { note, level, final }); });
       if (approved && !final) notifyApprovalPending(u, next);
-      else notifyWebhook(u, 'approval', approved ? '合同审批通过' : '合同被驳回', [`${c.number} ${c.name}`, `金额：¥${c.amount}`, `审批人：${u.display_name}（${level}）`, ...(note ? [`意见：${note}`] : [])]);
+      else {
+        const title = approved ? '合同审批通过' : '合同被驳回';
+        const lines = [`${c.number} ${c.name}`, `金额：¥${Number(c.amount).toLocaleString('zh-CN')}`, `审批人：${u.display_name}（${level}）`, ...(note ? [`意见：${note}`] : [])];
+        notifyWebhook(u, 'approval', title, lines);
+        notifyEmail(u, 'approval', [c.submittedBy, c.ownerId].filter(id => id !== u.id), title, lines, `#/contracts?q=${encodeURIComponent(c.number || '')}`);
+      }
       return send(res, 200, { ok: true, status: next.status, pending: approved && !final ? currentLevel(next) : null });
     }
     boom(404, '接口不存在');
@@ -1595,7 +1700,7 @@ async function api(req, res, url) {
       if (data.ownerId && data.ownerId !== before.ownerId && data.ownerId !== u.id) audit(u, 'assign', type, recordId, { ownerId: data.ownerId, owner: data.owner });
     });
     if (submitNow) notifyApprovalPending(u, { id: recordId, ...data });
-    if (data.ownerId && data.ownerId !== before.ownerId && data.ownerId !== u.id) notifyWebhook(u, 'assign', `${TABLES[type].label}分配`, [`${data.name || data.title || ''} 已分配给 ${data.owner}`, `操作人：${u.display_name}`]);
+    if (data.ownerId && data.ownerId !== before.ownerId && data.ownerId !== u.id) notifyAssign(u, type, data.ownerId, `${TABLES[type].label}分配`, [`${data.name || data.title || ''} 已分配给 ${data.owner}`, `操作人：${u.display_name}`], type === 'accounts' ? `#/accounts/${recordId}` : type === 'opportunities' ? `#/opportunities/${recordId}` : `#/${type}`);
     resetScope(u);
     return send(res, 200, { item: row(getRecord(u, type, recordId)) });
   }
@@ -1669,6 +1774,15 @@ const server = http.createServer(async (req, res) => {
 const housekeeping = setInterval(() => { purgeSessions(); pruneLoginFailures(); }, 3600 * 1000);
 housekeeping.unref();
 
+// ---------- 每日摘要邮件 ----------
+const DIGEST_TIME = /^\d{1,2}:\d{2}$/.test(process.env.DIGEST_TIME || '') ? process.env.DIGEST_TIME : '08:30';
+if (require.main === module) {
+  setInterval(() => {
+    const d = new Date(), [h, mi] = DIGEST_TIME.split(':').map(Number);
+    if (d.getHours() * 60 + d.getMinutes() >= h * 60 + mi) sendDigests().catch(e => logJson({ type: 'digest_error', message: e.message }));
+  }, 5 * 60 * 1000).unref();
+}
+
 // ---------- 定时备份 ----------
 const BACKUP_INTERVAL_HOURS = Number(process.env.BACKUP_INTERVAL_HOURS ?? 24);
 const BACKUP_KEEP = Number(process.env.BACKUP_KEEP ?? 14);
@@ -1688,4 +1802,4 @@ if (require.main === module) {
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
 }
-module.exports = { server, db, TABLES, STAGES };
+module.exports = { server, db, TABLES, STAGES, sendDigests, pendingMail };

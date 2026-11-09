@@ -322,6 +322,7 @@ function renderShell(r) {
             <div class="dd-head"><b>${esc(me.name)}</b><small>${esc(me.email)} · ${ROLE_LABEL[me.role]}</small></div>
             <button data-act="password">${icon('key')}修改密码</button>
             <button data-act="mfa">${icon('shield')}两步验证${me.mfaEnabled ? '（已启用）' : ''}</button>
+            ${settings.smtp?.enabled ? `<button data-act="email-toggle">${icon('mail')}邮件通知：${me.emailNotify ? '已开启' : '已关闭'}</button>` : ''}
             <button data-act="logout">${icon('logout')}退出登录</button>
           </div>
         </div>
@@ -1154,7 +1155,20 @@ async function pageSettings() {
         <label class="fld"><span>Webhook 地址（https）</span><input class="field" name="url" value="${esc(w.url || '')}" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…"></label>
         <div class="fld"><span>推送事件</span><div class="checks">${[['approval', '合同审批（待审批/结果）'], ['assign', '分配负责人']].map(([k, l]) => `<label class="check"><input type="checkbox" name="events" value="${k}" ${(w.events || []).includes(k) ? 'checked' : ''}> ${l}</label>`).join('')}</div></div>
         <div class="tools"><button class="btn" type="submit">保存通知设置</button>${w.url ? '<button type="button" class="btn light" data-act="webhook-test">发送测试消息</button>' : ''}</div>
-        <p class="muted small">钉钉机器人如开启“加签”，请改用“自定义关键词”安全设置（关键词可填系统名称）。站内通知无需配置，顶部铃铛即可查看。</p></form>`;
+        <p class="muted small">钉钉机器人如开启“加签”，请改用“自定义关键词”安全设置（关键词可填系统名称）。站内通知无需配置，顶部铃铛即可查看。</p></form>
+      <form id="smtpForm" class="settings-form"><h4 class="sec">邮件通知（SMTP）</h4>
+        <label class="check"><input type="checkbox" name="enabled" ${settings.smtp?.enabled ? 'checked' : ''}> 启用邮件通知</label>
+        <div class="form-grid">
+          <label class="fld"><span>SMTP 服务器</span><input class="field" name="host" value="${esc(settings.smtp?.host || '')}" placeholder="smtp.exmail.qq.com"></label>
+          <label class="fld"><span>端口</span><input class="field" name="port" type="number" min="1" max="65535" value="${esc(settings.smtp?.port || 465)}"></label>
+          <label class="fld"><span>加密方式</span><select class="field" name="secure">${[['ssl', 'SSL/TLS（465）'], ['starttls', 'STARTTLS（587）'], ['none', '不加密（仅限内网中继）']].map(([k, l]) => `<option value="${k}" ${settings.smtp?.secure === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+          <label class="fld"><span>发件人</span><input class="field" name="from" value="${esc(settings.smtp?.from || '')}" placeholder="NovaCRM 通知 &lt;crm@example.com&gt;"></label>
+          <label class="fld"><span>用户名</span><input class="field" name="user" value="${esc(settings.smtp?.user || '')}" autocomplete="off"></label>
+          <label class="fld"><span>密码 / 授权码</span><input class="field" name="pass" type="password" autocomplete="new-password" placeholder="${settings.smtp?.passSet ? '已保存，留空则不修改' : ''}"></label>
+        </div>
+        <div class="fld"><span>发送事件</span><div class="checks">${[['approval', '合同审批（待审批/结果）'], ['assign', '分配负责人'], ['digest', '每日待办摘要（默认 08:30）']].map(([k, l]) => `<label class="check"><input type="checkbox" name="events" value="${k}" ${(settings.smtp?.events || []).includes(k) ? 'checked' : ''}> ${l}</label>`).join('')}</div></div>
+        <div class="tools"><button class="btn" type="submit">保存邮件设置</button>${settings.smtp?.host ? '<button type="button" class="btn light" data-act="smtp-test">发送测试邮件给我</button><button type="button" class="btn light" data-act="digest-now">立即发送今日摘要</button>' : ''}</div>
+        <p class="muted small">企业邮箱请使用“客户端授权码”。邮件中的链接使用环境变量 PUBLIC_ORIGIN 作为站点地址。成员可在右上角个人菜单中关闭邮件通知。</p></form>`;
   } else if (tab === 'fields') {
     const CF_ENT = ['leads', 'accounts', 'contacts', 'opportunities', 'contracts'];
     const cf = ui.cfDraft ||= structuredClone(settings.customFields || {});
@@ -1187,6 +1201,13 @@ async function pageSettings() {
   $('#approvalForm')?.addEventListener('submit', async e => {
     e.preventDefault();
     try { settings = (await API.put('/settings', { approval: { levels: ui.apDraft } })).settings; ui.apDraft = null; toast('审批设置已保存'); rerender(); } catch (err) { toast(err.message, true); }
+  });
+  $('#smtpForm')?.addEventListener('submit', async e => {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    const smtp = { enabled: fd.has('enabled'), host: fd.get('host'), port: Number(fd.get('port')), secure: fd.get('secure'), from: fd.get('from'), user: fd.get('user'), events: fd.getAll('events') };
+    if (fd.get('pass')) smtp.pass = fd.get('pass');
+    try { settings = (await API.put('/settings', { smtp })).settings; toast('邮件设置已保存'); rerender(); } catch (err) { toast(err.message, true); }
   });
   $('#webhookForm')?.addEventListener('submit', async e => {
     e.preventDefault();
@@ -1310,6 +1331,9 @@ const ACTIONS = {
   'cf-reset': () => { ui.cfDraft = null; pageSettings(); },
   'ap-add': () => { ui.apDraft.push({ name: '总经理审批', role: 'admin', minAmount: 100000 }); pageSettings(); },
   'ap-del': t => { ui.apDraft.splice(Number(t.dataset.i), 1); pageSettings(); },
+  'smtp-test': async t => { t.disabled = true; try { const r = await API.post('/settings/smtp-test'); toast(`测试邮件已发送至 ${r.to}`); } finally { t.disabled = false; } },
+  'digest-now': async () => { const r = await API.post('/settings/digest-now'); toast(`已发送 ${r.sent} 封摘要邮件`); },
+  'email-toggle': async () => { const r = await API.patch('/me', { emailNotify: !me.emailNotify }); me = r.user; toast(me.emailNotify ? '已开启邮件通知' : '已关闭邮件通知'); $('#shell')?.remove(); rerender(); },
   'webhook-test': async () => { await API.post('/settings/webhook-test'); toast('测试消息已发送，请在群内查看'); },
   'backup-now': async () => { const r = await API.post('/backups'); toast('已生成备份 ' + r.name); rerender(); },
   'user-edit': t => userModal(R.users.find(u => u.id === t.dataset.id)),
