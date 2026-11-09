@@ -64,7 +64,7 @@ test('CRM V1.1 features', async t => {
     assert.equal((await req(`/opportunities/${opp.id}`, { method: 'DELETE' })).status, 409, '商机被合同引用不能删除');
     assert.equal((await req('/contracts', { method: 'POST', body: { name: 'dup', accountId: account.id, number: contract.number } })).status, 409);
 
-    await req('/users', { method: 'POST', body: { email: 'sales@local.crm', name: '销售', password: 'SalesPassword!23', role: 'sales' } });
+    await req('/users', { method: 'POST', body: { email: 'sales@local.crm', name: '销售', password: 'SalesPassword!23', role: 'sales', dataScope: 'all' } });
     const sc = await login('sales@local.crm', 'SalesPassword!23');
     assert.equal((await req(`/contracts/${contract.id}`, { method: 'PATCH', body: { status: '已签订' }, cookie: sc })).status, 403);
     assert.equal((await req(`/contracts/${contract.id}/submit`, { method: 'POST', cookie: sc })).status, 200);

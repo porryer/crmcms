@@ -1,0 +1,25 @@
+# HTTPS 生产部署：docker compose -f compose.yaml -f compose.https.yaml up -d --build
+services:
+  crm:
+    ports: !reset []
+    environment:
+      COOKIE_SECURE: "1"
+      TRUST_PROXY: "1"
+      PUBLIC_ORIGIN: https://${CRM_DOMAIN:?请在 .env 配置 CRM_DOMAIN}
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    depends_on: [crm]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      CRM_DOMAIN: ${CRM_DOMAIN}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+volumes:
+  caddy_data:
+  caddy_config:

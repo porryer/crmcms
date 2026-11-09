@@ -1,0 +1,14 @@
+# 自动申请/续期 Let's Encrypt 证书。CRM_DOMAIN 在 .env 中配置，域名需已解析到本机且 80/443 可从公网访问。
+{$CRM_DOMAIN} {
+	encode gzip
+	reverse_proxy crm:3100 {
+		header_up X-Forwarded-For {remote_host}
+	}
+	request_body {
+		max_size 25MB
+	}
+	log {
+		output stdout
+		format json
+	}
+}

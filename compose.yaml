@@ -12,6 +12,8 @@ services:
       CRM_ADMIN_PASSWORD: ${CRM_ADMIN_PASSWORD:?请在 .env 配置强密码}
       COOKIE_SECURE: ${COOKIE_SECURE:-0}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:3100}
+      BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS:-24}
+      BACKUP_KEEP: ${BACKUP_KEEP:-14}
     volumes:
       - crm_data:/app/data
     security_opt:

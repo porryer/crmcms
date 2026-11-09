@@ -9,6 +9,7 @@ const CONTRACT_STATUS = ['草稿', '审批中', '已签订', '执行中', '已�
 const PLAN_STATUS = ['待回款', '已回款'];
 const PRIORITY = ['低', '中', '高'];
 const ROLE_LABEL = { admin: '管理员', manager: '销售经理', sales: '销售', viewer: '只读' };
+const SCOPE_LABEL = { self: '仅本人', dept: '本部门', all: '全部数据' };
 const ENTITY_LABEL = { leads: '线索', accounts: '客户', contacts: '联系人', opportunities: '商机', tasks: '任务', activities: '跟进记录', contracts: '合同', payments: '回款', plans: '回款计划', users: '成员', settings: '系统设置', session: '登录', reports: '报表' };
 const ACTION_LABEL = { create: '新增', update: '修改', delete: '删除', convert: '线索转化', export: '导出', login: '登录', change_password: '修改密码', assign: '分配', submit: '提交审批', approve: '审批通过', reject: '审批驳回' };
 
@@ -82,13 +83,13 @@ const PAGE_TITLE = { dashboard: '工作台', leads: '线索管理', accounts: '�
 // ======================= 表单字段定义 =======================
 // [字段, 标签, 类型, 必填, 宽字段]
 const FORMS = {
-  leads: [['name', '线索姓名', 'text', 1], ['company', '公司名称'], ['phone', '手机号', 'tel'], ['email', '邮箱', 'email'], ['source', '线索来源', 'dict:leadSources'], ['status', '状态', LEAD_STATUS.filter(s => s !== '已转化')], ['owner', '负责人', 'user'], ['notes', '备注', 'textarea']],
-  accounts: [['name', '客户名称', 'text', 1], ['type', '客户类型', 'dict:accountTypes'], ['industry', '所属行业', 'dict:industries'], ['level', '客户级别', 'dict:accountLevels'], ['source', '客户来源', 'dict:leadSources'], ['status', '客户状态', 'dict:accountStatus'], ['phone', '联系电话', 'tel'], ['email', '邮箱', 'email'], ['owner', '负责人', 'user'], ['foundedAt', '成立时间', 'date'], ['address', '地址', 'text', 0, 1], ['notes', '备注', 'textarea']],
+  leads: [['name', '线索姓名', 'text', 1], ['company', '公司名称'], ['phone', '手机号', 'tel'], ['email', '邮箱', 'email'], ['source', '线索来源', 'dict:leadSources'], ['status', '状态', LEAD_STATUS.filter(s => s !== '已转化')], ['ownerId', '负责人', 'user'], ['notes', '备注', 'textarea']],
+  accounts: [['name', '客户名称', 'text', 1], ['type', '客户类型', 'dict:accountTypes'], ['industry', '所属行业', 'dict:industries'], ['level', '客户级别', 'dict:accountLevels'], ['source', '客户来源', 'dict:leadSources'], ['status', '客户状态', 'dict:accountStatus'], ['phone', '联系电话', 'tel'], ['email', '邮箱', 'email'], ['ownerId', '负责人', 'user'], ['foundedAt', '成立时间', 'date'], ['address', '地址', 'text', 0, 1], ['notes', '备注', 'textarea']],
   contacts: [['name', '姓名', 'text', 1], ['accountId', '所属客户', 'account', 1], ['title', '职位'], ['phone', '电话', 'tel'], ['email', '邮箱', 'email'], ['isPrimary', '设为主联系人', 'checkbox'], ['notes', '备注', 'textarea']],
-  opportunities: [['name', '商机名称', 'text', 1], ['accountId', '关联客户', 'account', 1], ['amount', '预计金额（元）', 'money'], ['probability', '成交概率（%）', 'percent'], ['stage', '商机阶段', STAGES], ['owner', '负责人', 'user'], ['expectedDate', '预计成交日', 'date'], ['notes', '备注', 'textarea']],
-  tasks: [['title', '任务名称', 'text', 1], ['accountId', '关联客户', 'account'], ['dueDate', '截止日期', 'date'], ['priority', '优先级', PRIORITY], ['status', '状态', TASK_STATUS], ['owner', '负责人', 'user'], ['notes', '备注', 'textarea']],
-  activities: [['accountId', '客户', 'account', 1], ['type', '跟进方式', 'dict:activityTypes'], ['occurredAt', '跟进时间', 'datetime'], ['result', '跟进结果', 'dict:activityResults'], ['content', '跟进内容', 'textarea', 1], ['nextAt', '下次跟进日期', 'date'], ['owner', '跟进人', 'user']],
-  contracts: [['name', '合同名称', 'text', 1], ['number', '合同编号（留空自动生成）'], ['accountId', '客户', 'account', 1], ['opportunityId', '关联商机', 'opportunity'], ['amount', '合同金额（元）', 'money'], ['status', '合同状态', 'contractStatus'], ['signedAt', '签订日期', 'date'], ['owner', '负责人', 'user'], ['startDate', '开始日期', 'date'], ['endDate', '结束日期', 'date'], ['notes', '备注', 'textarea']],
+  opportunities: [['name', '商机名称', 'text', 1], ['accountId', '关联客户', 'account', 1], ['amount', '预计金额（元）', 'money'], ['probability', '成交概率（%）', 'percent'], ['stage', '商机阶段', STAGES], ['ownerId', '负责人', 'user'], ['expectedDate', '预计成交日', 'date'], ['notes', '备注', 'textarea']],
+  tasks: [['title', '任务名称', 'text', 1], ['accountId', '关联客户', 'account'], ['dueDate', '截止日期', 'date'], ['priority', '优先级', PRIORITY], ['status', '状态', TASK_STATUS], ['ownerId', '负责人', 'user'], ['notes', '备注', 'textarea']],
+  activities: [['accountId', '客户', 'account', 1], ['type', '跟进方式', 'dict:activityTypes'], ['occurredAt', '跟进时间', 'datetime'], ['result', '跟进结果', 'dict:activityResults'], ['content', '跟进内容', 'textarea', 1], ['nextAt', '下次跟进日期', 'date'], ['ownerId', '跟进人', 'user']],
+  contracts: [['name', '合同名称', 'text', 1], ['number', '合同编号（留空自动生成）'], ['accountId', '客户', 'account', 1], ['opportunityId', '关联商机', 'opportunity'], ['amount', '合同金额（元）', 'money'], ['status', '合同状态', 'contractStatus'], ['signedAt', '签订日期', 'date'], ['ownerId', '负责人', 'user'], ['startDate', '开始日期', 'date'], ['endDate', '结束日期', 'date'], ['notes', '备注', 'textarea']],
   payments: [['contractId', '关联合同', 'contract', 1], ['amount', '回款金额（元）', 'money', 1], ['paidAt', '到账日期', 'date'], ['method', '付款方式', 'dict:paymentMethods'], ['notes', '备注', 'textarea']],
   plans: [['contractId', '关联合同', 'contract', 1], ['amount', '计划金额（元）', 'money', 1], ['dueDate', '计划回款日', 'date', 1], ['status', '状态', PLAN_STATUS], ['notes', '备注', 'textarea']],
 };
@@ -97,19 +98,19 @@ const FORMS = {
 const LISTS = {
   leads: { title: '线索管理', sub: '线索录入、分配、跟进与转客户', create: '新增线索',
     cols: [['name', '线索名称', 'strong'], ['company', '公司'], ['source', '来源'], ['phone', '手机号'], ['status', '状态', 'tag'], ['owner', '负责人'], ['createdAt', '创建时间', 'date']],
-    filters: [['source', '来源', 'dict:leadSources'], ['status', '状态', LEAD_STATUS], ['owner', '负责人', 'user']], batch: true },
+    filters: [['source', '来源', 'dict:leadSources'], ['status', '状态', LEAD_STATUS], ['ownerId', '负责人', 'user']], batch: true },
   accounts: { title: '客户管理', sub: '客户列表、搜索、筛选与批量操作', create: '新增客户',
     cols: [['name', '客户名称', 'accountLink'], ['type', '客户类型'], ['industry', '行业'], ['level', '客户级别', 'tag'], ['owner', '负责人'], ['phone', '联系电话'], ['status', '状态', 'tag']],
-    filters: [['type', '客户类型', 'dict:accountTypes'], ['industry', '行业', 'dict:industries'], ['level', '客户级别', 'dict:accountLevels'], ['owner', '负责人', 'user']], batch: true },
+    filters: [['type', '客户类型', 'dict:accountTypes'], ['industry', '行业', 'dict:industries'], ['level', '客户级别', 'dict:accountLevels'], ['ownerId', '负责人', 'user']], batch: true },
   contacts: { title: '联系人', sub: '客户联系人档案', create: '新增联系人',
     cols: [['name', '姓名', 'strong'], ['accountId', '所属客户', 'account'], ['title', '职位'], ['phone', '电话'], ['email', '邮箱'], ['isPrimary', '主联系人', 'bool']],
     filters: [['accountId', '客户', 'account']], batch: true },
   opportunities: { title: '商机管理', sub: '商机阶段、预计金额与成交预测', create: '新增商机',
     cols: [['name', '商机名称', 'oppLink'], ['accountId', '客户', 'account'], ['amount', '预计金额', 'money'], ['stage', '阶段', 'tag'], ['probability', '赢率', 'pct'], ['owner', '负责人'], ['expectedDate', '预计成交', 'date']],
-    filters: [['stage', '阶段', STAGES], ['owner', '负责人', 'user']], batch: true },
+    filters: [['stage', '阶段', STAGES], ['ownerId', '负责人', 'user']], batch: true },
   contracts: { title: '合同订单', sub: '合同列表、审批与回款进度', create: '新增合同',
     cols: [['number', '合同编号', 'strong'], ['name', '合同名称'], ['accountId', '客户', 'account'], ['amount', '金额(元)', 'money'], ['signedAt', '签订日期', 'date'], ['status', '状态', 'tag'], ['owner', '负责人']],
-    filters: [['status', '合同状态', CONTRACT_STATUS], ['owner', '负责人', 'user']], batch: false },
+    filters: [['status', '合同状态', CONTRACT_STATUS], ['ownerId', '负责人', 'user']], batch: false },
   payments: { title: '回款记录', create: '登记回款',
     cols: [['paidAt', '到账日期', 'date'], ['contractId', '合同', 'contract'], ['customer', '客户', 'contractAccount'], ['amount', '金额(元)', 'money'], ['method', '付款方式'], ['notes', '备注']],
     filters: [['method', '付款方式', 'dict:paymentMethods']], batch: false, noEdit: true },
@@ -118,10 +119,10 @@ const LISTS = {
     filters: [['status', '状态', PLAN_STATUS]], batch: false },
   tasks: { title: '跟进任务', sub: '任务列表、提醒与完成状态', create: '新建任务',
     cols: [['done', '', 'taskCheck'], ['title', '任务', 'strong'], ['accountId', '客户', 'account'], ['owner', '负责人'], ['dueDate', '截止时间', 'date'], ['priority', '优先级', 'tag'], ['status', '状态', 'taskStatus']],
-    filters: [['owner', '负责人', 'user'], ['priority', '优先级', PRIORITY]], batch: true },
+    filters: [['ownerId', '负责人', 'user'], ['priority', '优先级', PRIORITY]], batch: true },
   activities: { title: '跟进记录', sub: '客户沟通与拜访记录', create: '写跟进',
     cols: [['occurredAt', '时间', 'datetime'], ['accountId', '客户', 'account'], ['type', '方式', 'activityType'], ['content', '跟进内容', 'clip'], ['result', '结果', 'tag'], ['owner', '负责人'], ['nextAt', '下次跟进', 'date']],
-    filters: [['type', '方式', 'dict:activityTypes'], ['result', '结果', 'dict:activityResults'], ['owner', '负责人', 'user']], batch: false },
+    filters: [['type', '方式', 'dict:activityTypes'], ['result', '结果', 'dict:activityResults'], ['ownerId', '负责人', 'user']], batch: false },
 };
 
 // ======================= 状态 =======================
@@ -366,9 +367,9 @@ function optionList(kind, current = '', withEmpty = '') {
   let opts = [];
   if (Array.isArray(kind)) opts = kind.map(v => [v, v]);
   else if (kind.startsWith('dict:')) opts = dict(kind.slice(5)).map(v => [v, v]);
-  else if (kind === 'user') opts = R.users.filter(u => u.active).map(u => [u.name, u.name]);
+  else if (kind === 'user') opts = R.users.filter(u => u.active).map(u => [u.id, u.name]);
   else if (kind === 'account') opts = [...R.accounts.values()].map(a => [a.id, a.name]);
-  if (current && !opts.some(([v]) => v === current)) opts.unshift([current, kind === 'account' ? accountName(current) || current : current]);
+  if (current && !opts.some(([v]) => v === current)) opts.unshift([current, kind === 'account' ? accountName(current) || current : kind === 'user' ? (R.users.find(u => u.id === current)?.name || '（已停用成员）') : current]);
   return (withEmpty !== false ? `<option value="">${withEmpty || '全部'}</option>` : '') + opts.map(([v, l]) => `<option value="${esc(v)}" ${v === current ? 'selected' : ''}>${esc(l)}</option>`).join('');
 }
 
@@ -449,7 +450,7 @@ function mountList(container, type, opts = {}) {
       <div class="filters">${filters}<label class="search">${icon('search')}<input data-act-input="list-q" placeholder="输入关键字搜索" value="${esc(L.q)}"></label></div>
       <div class="tools">
         <span class="batch" id="batchBar" hidden><span class="muted" id="batchCount"></span>
-          ${def.batch && canEdit() && FORMS[type].some(f => f[0] === 'owner') ? '<button class="btn light small" data-act="batch-assign">批量分配</button>' : ''}
+          ${def.batch && canEdit() && FORMS[type].some(f => f[0] === 'ownerId') ? '<button class="btn light small" data-act="batch-assign">批量分配</button>' : ''}
           ${def.batch && canManage() ? '<button class="btn light small danger" data-act="batch-delete">批量删除</button>' : ''}</span>
         ${canEdit() ? `<button class="btn light" data-act="export">${icon('download')}导出</button>` : ''}
         ${canEdit() && def.create ? `<button class="btn" data-act="create" data-type="${type}">${icon('plus')}${def.create}</button>` : ''}
@@ -565,7 +566,7 @@ async function editRecord(type, id = null, preset = {}) {
   let record = { ...preset };
   if (id) record = (await API.get(`/${type}/${id}`)).item;
   else {
-    if (FORMS[type].some(f => f[0] === 'owner') && !record.owner) record.owner = me.name;
+    if (FORMS[type].some(f => f[0] === 'ownerId') && !record.ownerId) record.ownerId = me.id;
     if (type === 'activities' && !record.occurredAt) record.occurredAt = nowLocal();
     if (type === 'payments' && !record.paidAt) record.paidAt = ymd();
   }
@@ -584,7 +585,7 @@ async function viewRecord(type, id) {
   const { item } = await API.get(`/${type}/${id}`);
   const rows = FORMS[type].map(([k, label, kind]) => {
     let v = item[k];
-    if (kind === 'account') v = accountName(v); else if (kind === 'contract') v = contractLabel(v); else if (kind === 'opportunity') v = R.opportunities.get(v)?.name;
+    if (kind === 'user') v = item.owner; else if (kind === 'account') v = accountName(v); else if (kind === 'contract') v = contractLabel(v); else if (kind === 'opportunity') v = R.opportunities.get(v)?.name;
     else if (kind === 'money') v = money(v); else if (kind === 'checkbox') v = v ? '是' : '否'; else if (kind === 'datetime') v = fmtDateTime(v);
     return `<div class="kv ${kind === 'textarea' ? 'wide' : ''}"><span>${label.replace(/（.*?）/, '')}</span><b>${esc(v || '—')}</b></div>`;
   }).join('');
@@ -600,9 +601,9 @@ async function deleteRecord(type, id) {
 function assignModal(type, ids) {
   openModal({
     title: `分配负责人（${ids.length} 条）`,
-    body: `<label class="fld wide"><span>负责人 <i class="req">*</i></span><select class="field" name="owner" required>${optionList('user', '', '请选择负责人')}</select></label>`,
+    body: `<label class="fld wide"><span>负责人 <i class="req">*</i></span><select class="field" name="ownerId" required>${optionList('user', '', '请选择负责人')}</select></label>`,
     onSubmit: async fd => {
-      const r = await API.post(`/${type}/batch`, { action: 'assign', ids, owner: fd.get('owner') });
+      const r = await API.post(`/${type}/batch`, { action: 'assign', ids, ownerId: fd.get('ownerId') });
       toast(`已分配 ${r.done.length} 条${r.failed.length ? `，失败 ${r.failed.length} 条` : ''}`);
       if (ui.list) ui.list.selected.clear();
       rerender();
@@ -765,7 +766,7 @@ async function pageOpportunities(r) {
     return mountList($('#listHost'), 'opportunities', { q: r.params.get('q') || '' });
   }
   const owner = r.params.get('owner') || '';
-  const items = [...R.opportunities.values()].filter(o => !owner || o.owner === owner);
+  const items = [...R.opportunities.values()].filter(o => !owner || o.ownerId === owner);
   const totalOpen = items.filter(o => !['赢单', '输单'].includes(o.stage));
   $('#content').innerHTML = pageHead('商机管理', `进行中 ${totalOpen.length} 个 · 预计金额 ${money(totalOpen.reduce((a, o) => a + Number(o.amount || 0), 0))} · 拖拽卡片可变更阶段`,
     `${switcher}<select class="field slim" data-act-change="opp-owner">${optionList('user', owner, '全部负责人')}</select>${canEdit() ? `<button class="btn" data-act="create" data-type="opportunities">${icon('plus')}新建商机</button>` : ''}`) +
@@ -915,12 +916,12 @@ async function pageReports() {
 async function pageTeam() {
   const items = R.users;
   $('#content').innerHTML = pageHead('团队管理', '成员、部门、角色与权限', isAdmin() ? `<button class="btn" data-act="user-create">${icon('plus')}新增成员</button>` : '') + `
-    <section class="panel flush"><div class="tbl-wrap"><table><thead><tr><th>姓名</th>${canManage() ? '<th>账号</th>' : ''}<th>部门</th><th>角色</th><th>状态</th>${canManage() ? '<th>最近登录</th>' : ''}${isAdmin() ? '<th class="ops">操作</th>' : ''}</tr></thead><tbody>
-      ${items.map(u => `<tr><td><span class="who">${avatar(u.name, 'blue')}<b>${esc(u.name)}</b>${u.id === me.id ? '<span class="tag gray">我</span>' : ''}</span></td>${canManage() ? `<td>${esc(u.email)}</td>` : ''}<td>${esc(u.department || '—')}</td><td><span class="tag ${u.role === 'admin' ? 'red' : u.role === 'manager' ? 'orange' : u.role === 'sales' ? 'blue' : 'gray'}">${ROLE_LABEL[u.role]}</span></td><td><span class="dot ${u.active ? 'on' : 'off'}"></span>${u.active ? '正常' : '停用'}</td>${canManage() ? `<td>${u.lastLoginAt ? fmtDateTime(u.lastLoginAt) : '—'}</td>` : ''}${isAdmin() ? `<td class="ops"><div class="row-actions"><button class="textbtn" data-act="user-edit" data-id="${esc(u.id)}">编辑</button>${u.id !== me.id ? `<button class="textbtn ${u.active ? 'danger' : ''}" data-act="user-toggle" data-id="${esc(u.id)}">${u.active ? '停用' : '启用'}</button>` : ''}</div></td>` : ''}</tr>`).join('')}
+    <section class="panel flush"><div class="tbl-wrap"><table><thead><tr><th>姓名</th>${canManage() ? '<th>账号</th>' : ''}<th>部门</th><th>角色</th>${canManage() ? '<th>数据范围</th>' : ''}<th>状态</th>${canManage() ? '<th>最近登录</th>' : ''}${isAdmin() ? '<th class="ops">操作</th>' : ''}</tr></thead><tbody>
+      ${items.map(u => `<tr><td><span class="who">${avatar(u.name, 'blue')}<b>${esc(u.name)}</b>${u.id === me.id ? '<span class="tag gray">我</span>' : ''}</span></td>${canManage() ? `<td>${esc(u.email)}</td>` : ''}<td>${esc(u.department || '—')}</td><td><span class="tag ${u.role === 'admin' ? 'red' : u.role === 'manager' ? 'orange' : u.role === 'sales' ? 'blue' : 'gray'}">${ROLE_LABEL[u.role]}</span></td>${canManage() ? `<td>${SCOPE_LABEL[u.dataScope] || '—'}</td>` : ''}<td><span class="dot ${u.active ? 'on' : 'off'}"></span>${u.active ? '正常' : '停用'}</td>${canManage() ? `<td>${u.lastLoginAt ? fmtDateTime(u.lastLoginAt) : '—'}</td>` : ''}${isAdmin() ? `<td class="ops"><div class="row-actions"><button class="textbtn" data-act="user-edit" data-id="${esc(u.id)}">编辑</button>${u.id !== me.id ? `<button class="textbtn ${u.active ? 'danger' : ''}" data-act="user-toggle" data-id="${esc(u.id)}">${u.active ? '停用' : '启用'}</button>` : ''}</div></td>` : ''}</tr>`).join('')}
     </tbody></table></div></section>
     <section class="panel"><h3>角色权限说明</h3><div class="tbl-wrap plain"><table><thead><tr><th>角色</th><th>查看</th><th>新增/编辑</th><th>删除</th><th>合同审批</th><th>导出</th><th>审计日志</th><th>成员与系统设置</th></tr></thead><tbody>
       ${[['管理员', 1, 1, 1, 1, 1, 1, 1], ['销售经理', 1, 1, 1, 1, 1, 1, 0], ['销售', 1, 1, 0, 0, 1, 0, 0], ['只读', 1, 0, 0, 0, 0, 0, 0]].map(([n, ...f]) => `<tr><td><b>${n}</b></td>${f.map(v => `<td>${v ? '<span class="ok">✓</span>' : '<span class="muted">—</span>'}</td>`).join('')}</tr>`).join('')}
-    </tbody></table></div><p class="muted small">当前版本按角色控制功能权限，尚未实现“仅看本人/本部门数据”的行级数据权限。</p></section>`;
+    </tbody></table></div><p class="muted small">数据范围：<b>仅本人</b>＝自己负责的线索、客户及其下的商机/合同/回款/跟进；<b>本部门</b>＝同部门成员负责的数据；<b>全部数据</b>＝租户内全部。默认：销售为仅本人，其余角色为全部。</p></section>`;
 }
 function userModal(u = null) {
   const deptOpts = optionList('dict:departments', u?.department || '', '请选择');
@@ -931,6 +932,7 @@ function userModal(u = null) {
       <label class="fld"><span>登录邮箱 <i class="req">*</i></span><input class="field" name="email" type="email" ${u ? 'disabled' : 'required'} value="${esc(u?.email || '')}"></label>
       <label class="fld"><span>部门</span><select class="field" name="department">${deptOpts}</select></label>
       <label class="fld"><span>角色</span><select class="field" name="role" ${u?.id === me.id ? 'disabled' : ''}>${Object.entries(ROLE_LABEL).map(([k, l]) => `<option value="${k}" ${(u?.role || 'sales') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label class="fld"><span>数据范围</span><select class="field" name="dataScope"><option value="">按角色默认</option>${Object.entries(SCOPE_LABEL).map(([k, l]) => `<option value="${k}" ${u?.dataScopeSet === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       <label class="fld wide"><span>${u ? '重置密码（留空不修改，至少12位）' : '初始密码（至少12位）'} ${u ? '' : '<i class="req">*</i>'}</span><input class="field" name="password" type="password" minlength="12" autocomplete="new-password" ${u ? '' : 'required'}></label></div>`,
     onSubmit: async fd => {
       const body = Object.fromEntries(fd);
@@ -961,7 +963,10 @@ async function pageSettings() {
     pane = items.length ? `<div class="tbl-wrap plain"><table><thead><tr><th>时间</th><th>操作人</th><th>行为</th><th>对象</th><th>记录编号</th></tr></thead><tbody>${items.map(x => `<tr><td>${fmtDateTime(x.at)}</td><td>${esc(x.user_name || '—')}</td><td>${tag(ACTION_LABEL[x.action] || x.action)}</td><td>${esc(ENTITY_LABEL[x.entity] || x.entity)}</td><td><code>${esc(x.entity_id.slice(0, 8))}</code></td></tr>`).join('')}</tbody></table></div><p class="muted small">显示最近 300 条。</p>` : '<div class="empty">暂无审计日志</div>';
   } else {
     const h = await API.get('/health');
-    pane = `<div class="kv-grid">${[['系统版本', 'V' + h.version], ['数据存储', 'SQLite（WAL）'], ['会话有效期', '8 小时，HttpOnly + SameSite Cookie'], ['密码策略', '≥12 位，scrypt 加盐散列'], ['登录保护', '同账号 15 分钟内失败 5 次锁定'], ['数据备份', 'npm run backup（SQLite 在线快照）']].map(([k, v]) => `<div class="kv"><span>${k}</span><b>${esc(v)}</b></div>`).join('')}</div>`;
+    const bk = isAdmin() ? await API.get('/backups') : null;
+    pane = (bk ? `<div class="panel-head"><h4>数据备份</h4><button class="btn small" data-act="backup-now">${icon('download')}立即备份</button></div>
+      <p class="muted small">自动备份：${bk.schedule.intervalHours > 0 ? `每 ${bk.schedule.intervalHours} 小时一次` : '已关闭'}，保留最近 ${bk.schedule.keep} 份；快照位于数据目录 backups/。恢复需停服后执行 <code>node scripts/restore.js &lt;快照&gt; --yes</code>。</p>
+      ${bk.items.length ? `<div class="tbl-wrap plain"><table class="mini"><thead><tr><th>快照文件</th><th>大小</th><th>时间</th></tr></thead><tbody>${bk.items.map(b => `<tr><td><code>${esc(b.name)}</code></td><td>${(b.size / 1024).toFixed(0)} KB</td><td>${fmtDateTime(b.createdAt)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">暂无备份</p>'}<h4 class="sec">安全配置</h4>` : '') + `<div class="kv-grid">${[['系统版本', 'V' + h.version], ['数据存储', 'SQLite（WAL）'], ['会话有效期', '8 小时，HttpOnly + SameSite Cookie'], ['密码策略', '≥12 位，scrypt 加盐散列'], ['登录保护', '同账号 15 分钟内失败 5 次锁定'], ['数据权限', '按成员“数据范围”控制（本人/本部门/全部）'], ['金额存储', '整数“分”，避免浮点误差']].map(([k, v]) => `<div class="kv"><span>${k}</span><b>${esc(v)}</b></div>`).join('')}</div>`;
   }
   $('#content').innerHTML = pageHead('系统设置', '基础设置、数据字典、字段与审计日志') + `<section class="panel settings"><div class="tabs">${tabs.map(([k, l]) => `<button class="tab ${k === tab ? 'on' : ''}" data-act="settings-tab" data-tab="${k}">${l}</button>`).join('')}</div><div class="tab-pane">${pane}</div></section>`;
   $('#basicForm')?.addEventListener('submit', async e => {
@@ -1046,6 +1051,7 @@ const ACTIONS = {
   'report-query': () => { ui.tabs.reports = { from: $('#rFrom').value, to: $('#rTo').value }; rerender(); },
   'report-export': () => { location.href = `/api/reports?from=${encodeURIComponent($('#rFrom').value)}&to=${encodeURIComponent($('#rTo').value)}&format=csv`; },
   'user-create': () => userModal(),
+  'backup-now': async () => { const r = await API.post('/backups'); toast('已生成备份 ' + r.name); rerender(); },
   'user-edit': t => userModal(R.users.find(u => u.id === t.dataset.id)),
   'user-toggle': async t => {
     const u = R.users.find(x => x.id === t.dataset.id);

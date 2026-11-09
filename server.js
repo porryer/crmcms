@@ -8,6 +8,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
+const backups = require('./lib/backup');
 
 const VERSION = '1.1.0';
 const PORT = Number(process.env.PORT || 3100);
@@ -37,6 +38,12 @@ function addColumn(table, column, ddl) {
 addColumn('tenants', 'settings', "settings TEXT NOT NULL DEFAULT '{}'");
 addColumn('users', 'department', "department TEXT NOT NULL DEFAULT ''");
 addColumn('users', 'last_login_at', 'last_login_at TEXT');
+addColumn('users', 'data_scope', "data_scope TEXT NOT NULL DEFAULT ''");
+db.exec(`
+CREATE INDEX IF NOT EXISTS idx_records_account ON records(tenant_id,type,json_extract(data,'$.accountId')) WHERE deleted=0;
+CREATE INDEX IF NOT EXISTS idx_records_contract ON records(tenant_id,type,json_extract(data,'$.contractId')) WHERE deleted=0;
+CREATE INDEX IF NOT EXISTS idx_records_opportunity ON records(tenant_id,type,json_extract(data,'$.opportunityId')) WHERE deleted=0;
+`);
 
 // ---------- 业务字典 ----------
 const STAGES = ['初步沟通', '需求确认', '方案报价', '商务谈判', '赢单', '输单'];
@@ -48,6 +55,10 @@ const CONTRACT_APPROVED = ['已签订', '执行中', '已完成', '已作废']; 
 const PLAN_STATUS = ['待回款', '已回款'];
 const PRIORITY = ['低', '中', '高'];
 const ROLES = ['admin', 'manager', 'sales', 'viewer'];
+const DATA_SCOPES = ['self', 'dept', 'all'];
+const DEFAULT_SCOPE = { admin: 'all', manager: 'all', sales: 'self', viewer: 'all' };
+/** 金额字段在库中以整数“分”存储（amountCents），API 对外仍为“元” */
+const MONEY_TYPES = new Set(['opportunities', 'contracts', 'payments', 'plans']);
 
 /** V1.0 旧枚举值 → V1.1 新值（入参归一化 + 启动迁移共用） */
 const LEGACY = {
@@ -79,11 +90,11 @@ const DEFAULT_SETTINGS = {
  */
 const TABLES = {
   leads: {
-    label: '线索', fields: ['name', 'company', 'phone', 'email', 'source', 'status', 'owner', 'notes', 'convertedAccountId'],
+    label: '线索', fields: ['name', 'company', 'phone', 'email', 'source', 'status', 'owner', 'ownerId', 'notes', 'convertedAccountId'],
     required: ['name'], defaults: { status: '未联系', source: '其他' }, enums: { status: LEAD_STATUS },
   },
   accounts: {
-    label: '客户', fields: ['name', 'type', 'industry', 'level', 'source', 'status', 'phone', 'email', 'owner', 'address', 'foundedAt', 'notes'],
+    label: '客户', fields: ['name', 'type', 'industry', 'level', 'source', 'status', 'phone', 'email', 'owner', 'ownerId', 'address', 'foundedAt', 'notes'],
     required: ['name'], defaults: { type: '企业客户', level: '普通', status: '合作中' },
   },
   contacts: {
@@ -91,20 +102,20 @@ const TABLES = {
     required: ['name', 'accountId'], defaults: {},
   },
   opportunities: {
-    label: '商机', fields: ['name', 'accountId', 'amount', 'probability', 'stage', 'owner', 'expectedDate', 'notes'],
+    label: '商机', fields: ['name', 'accountId', 'amount', 'probability', 'stage', 'owner', 'ownerId', 'expectedDate', 'notes'],
     required: ['name', 'accountId'], defaults: { amount: 0, stage: '初步沟通', probability: 10 },
     enums: { stage: STAGES }, numbers: { probability: [0, 100] },
   },
   tasks: {
-    label: '任务', fields: ['title', 'accountId', 'dueDate', 'priority', 'status', 'owner', 'notes'],
+    label: '任务', fields: ['title', 'accountId', 'dueDate', 'priority', 'status', 'owner', 'ownerId', 'notes'],
     required: ['title'], defaults: { priority: '中', status: '待处理' }, enums: { status: TASK_STATUS, priority: PRIORITY },
   },
   activities: {
-    label: '跟进记录', fields: ['accountId', 'type', 'content', 'result', 'occurredAt', 'nextAt', 'owner'],
+    label: '跟进记录', fields: ['accountId', 'type', 'content', 'result', 'occurredAt', 'nextAt', 'owner', 'ownerId'],
     required: ['accountId', 'content'], defaults: { type: '电话', result: '有效跟进' },
   },
   contracts: {
-    label: '合同', fields: ['name', 'number', 'accountId', 'opportunityId', 'amount', 'status', 'signedAt', 'startDate', 'endDate', 'owner', 'notes', 'approvalNote'],
+    label: '合同', fields: ['name', 'number', 'accountId', 'opportunityId', 'amount', 'status', 'signedAt', 'startDate', 'endDate', 'owner', 'ownerId', 'notes', 'approvalNote'],
     required: ['name', 'accountId'], defaults: { status: '草稿', amount: 0 }, enums: { status: CONTRACT_STATUS },
   },
   payments: {
@@ -137,7 +148,19 @@ const yuan = c => c / 100;
 const sumCents = arr => arr.reduce((a, x) => a + cents(x.amount), 0);
 const pct = (cur, prev) => (prev ? Math.round(((cur - prev) / prev) * 1000) / 10 : (cur ? 100 : 0));
 
-const row = r => (r ? { id: r.id, createdAt: r.created_at, updatedAt: r.updated_at, ...JSON.parse(r.data) } : null);
+function row(r) {
+  if (!r) return null;
+  const d = JSON.parse(r.data);
+  if (Object.hasOwn(d, 'amountCents')) { d.amount = d.amountCents / 100; delete d.amountCents; }
+  return { id: r.id, createdAt: r.created_at, updatedAt: r.updated_at, createdBy: r.created_by, ...d };
+}
+/** API 数据 → 落库 JSON（金额转整数分，去掉元数据字段） */
+function serialize(type, data) {
+  const d = { ...data };
+  for (const k of ['id', 'createdAt', 'updatedAt', 'createdBy']) delete d[k];
+  if (MONEY_TYPES.has(type) && Object.hasOwn(d, 'amount')) { d.amountCents = Math.round(Number(d.amount || 0) * 100); delete d.amount; }
+  return JSON.stringify(d);
+}
 const hashPwd = (password, salt = crypto.randomBytes(16).toString('hex')) => `${salt}:${crypto.scryptSync(password, salt, 64).toString('hex')}`;
 function verifyPwd(pwd, hash) {
   const [salt, expected] = String(hash).split(':');
@@ -147,6 +170,47 @@ function verifyPwd(pwd, hash) {
 }
 const getRecord = (u, type, key) => db.prepare('SELECT * FROM records WHERE id=? AND tenant_id=? AND type=? AND deleted=0').get(key, u.tenant_id, type);
 const all = (u, type) => db.prepare('SELECT * FROM records WHERE tenant_id=? AND type=? AND deleted=0 ORDER BY created_at DESC').all(u.tenant_id, type).map(row);
+/** 按关联字段取子记录（走表达式索引，不做数据范围过滤，用于完整性校验） */
+const childrenOf = (u, type, field, value) => db.prepare(`SELECT * FROM records WHERE tenant_id=? AND type=? AND deleted=0 AND json_extract(data,'$.${field}')=?`).all(u.tenant_id, type, value).map(row);
+
+// ---------- 行级数据权限 ----------
+const effectiveScope = u => (DATA_SCOPES.includes(u.data_scope) ? u.data_scope : DEFAULT_SCOPE[u.role] || 'self');
+/** 可见负责人集合；null 表示全部可见 */
+function scopeOwners(u) {
+  if (u._owners !== undefined) return u._owners;
+  const scope = effectiveScope(u);
+  if (scope === 'all') return (u._owners = null);
+  if (scope === 'dept' && u.department) return (u._owners = new Set(db.prepare('SELECT id FROM users WHERE tenant_id=? AND department=?').all(u.tenant_id, u.department).map(x => x.id)));
+  return (u._owners = new Set([u.id]));
+}
+/**
+ * 当前用户可见的记录：
+ * 线索/客户按负责人；联系人随客户；回款/回款计划随合同；商机/合同/跟进/任务 = 本人负责 或 所属客户可见。
+ * 未设置负责人的记录归创建人。
+ */
+function scoped(u, type) {
+  const owners = scopeOwners(u);
+  if (!owners) return all(u, type);
+  const memo = (u._scoped ||= {});
+  if (memo[type]) return memo[type];
+  const own = x => owners.has(x.ownerId || x.createdBy);
+  const items = all(u, type);
+  const ids = t => new Set(scoped(u, t).map(x => x.id));
+  let res;
+  if (type === 'leads' || type === 'accounts') res = items.filter(own);
+  else if (type === 'contacts') { const acc = ids('accounts'); res = items.filter(x => acc.has(x.accountId)); }
+  else if (type === 'payments' || type === 'plans') { const c = ids('contracts'); res = items.filter(x => c.has(x.contractId)); }
+  else { const acc = ids('accounts'); res = items.filter(x => own(x) || acc.has(x.accountId)); }
+  return (memo[type] = res);
+}
+/** 取单条且校验数据范围 */
+function getVisible(u, type, key) {
+  const r = getRecord(u, type, key);
+  if (!r || !scopeOwners(u)) return r;
+  return scoped(u, type).some(x => x.id === key) ? r : undefined;
+}
+const resetScope = u => { delete u._scoped; };
+
 function audit(u, action, entity, entityId, details = {}) {
   db.prepare('INSERT INTO audits VALUES(?,?,?,?,?,?,?,?)').run(newId(), u.tenant_id, u.id, action, entity, entityId, JSON.stringify(details), now());
 }
@@ -206,9 +270,13 @@ function pruneLoginFailures() {
   for (const [k, v] of loginFailures) if (t - v.first >= LOGIN_WINDOW_MS) loginFailures.delete(k);
 }
 
+/** 反向代理部署时设置 TRUST_PROXY=1，取 X-Forwarded-For 最左侧地址 */
+const clientIp = req => (process.env.TRUST_PROXY === '1' && req.headers['x-forwarded-for'] ? String(req.headers['x-forwarded-for']).split(',')[0].trim() : req.socket.remoteAddress || '');
+const SECURITY_HEADERS = process.env.COOKIE_SECURE === '1' ? { 'Strict-Transport-Security': 'max-age=31536000' } : {};
+
 // ---------- HTTP 工具 ----------
 const send = (res, status, body, headers = {}) => {
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...headers });
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...SECURITY_HEADERS, ...headers });
   res.end(JSON.stringify(body));
 };
 function readBody(req) {
@@ -272,12 +340,39 @@ function sanitize(type, obj, existing = {}) {
 }
 
 function collectedCents(u, contractId) {
-  return sumCents(all(u, 'payments').filter(x => x.contractId === contractId));
+  return sumCents(childrenOf(u, 'payments', 'contractId', contractId));
+}
+
+/**
+ * 负责人解析：优先 ownerId（成员 ID）；兼容旧接口按姓名传 owner。
+ * 新建未指定时默认当前用户；仅“全部”范围可分配给任意人，“本部门”限本部门，“本人”仅能给自己。
+ */
+function resolveOwner(u, type, data, submitted, before = null) {
+  if (!TABLES[type].fields.includes('ownerId')) return;
+  let target;
+  if (Object.hasOwn(submitted, 'ownerId')) target = submitted.ownerId ? findUser(u, { id: submitted.ownerId }) : null;
+  else if (Object.hasOwn(submitted, 'owner')) target = submitted.owner ? findUser(u, { name: submitted.owner }) : null;
+  else if (!before) target = u;
+  else return;
+  if (target === undefined) boom(400, '负责人不存在或已停用');
+  if (target && target.id !== before?.ownerId) assertCanAssign(u, target);
+  data.ownerId = target ? target.id : '';
+  data.owner = target ? target.display_name : '';
+}
+function findUser(u, { id, name }) {
+  const rows = id ? db.prepare('SELECT * FROM users WHERE tenant_id=? AND id=? AND active=1').all(u.tenant_id, id)
+    : db.prepare('SELECT * FROM users WHERE tenant_id=? AND display_name=? AND active=1').all(u.tenant_id, String(name).trim());
+  return rows.length === 1 ? rows[0] : undefined;
+}
+function assertCanAssign(u, target) {
+  const scope = effectiveScope(u);
+  if (scope === 'self' && target.id !== u.id) boom(403, '当前数据范围为“本人”，不能分配给其他成员');
+  if (scope === 'dept' && target.id !== u.id && (!u.department || target.department !== u.department)) boom(403, '只能分配给本部门成员');
 }
 
 function validRefs(u, type, data, recordId = null) {
   for (const [field, refType] of [['accountId', 'accounts'], ['opportunityId', 'opportunities'], ['contractId', 'contracts']]) {
-    if (data[field] && !getRecord(u, refType, data[field])) boom(400, `${LABELS[field] || field}关联数据不存在`);
+    if (data[field] && !getVisible(u, refType, data[field])) boom(400, `${LABELS[field] || field}关联数据不存在或无权访问`);
   }
   if (type === 'payments') {
     const contract = row(getRecord(u, 'contracts', data.contractId));
@@ -290,7 +385,7 @@ function validRefs(u, type, data, recordId = null) {
   if (type === 'contracts') {
     if (recordId && cents(data.amount) < collectedCents(u, recordId)) boom(409, '合同金额不能低于已登记回款');
     if (data.number) {
-      const dup = all(u, 'contracts').find(x => x.number === data.number && x.id !== recordId);
+      const dup = db.prepare("SELECT id FROM records WHERE tenant_id=? AND type='contracts' AND deleted=0 AND json_extract(data,'$.number')=? AND id<>?").get(u.tenant_id, data.number, recordId || '');
       if (dup) boom(409, `合同编号 ${data.number} 已存在`);
     }
     if (data.opportunityId) {
@@ -320,20 +415,20 @@ function nextContractNumber(u) {
 
 function insertRecord(u, type, data, t = now()) {
   const key = newId();
-  db.prepare('INSERT INTO records VALUES(?,?,?,?,?,?,?,?,?)').run(key, u.tenant_id, type, JSON.stringify(data), t, t, u.id, u.id, 0);
-  return { id: key, createdAt: t, updatedAt: t, ...data };
+  db.prepare('INSERT INTO records VALUES(?,?,?,?,?,?,?,?,?)').run(key, u.tenant_id, type, serialize(type, data), t, t, u.id, u.id, 0);
+  return { id: key, createdAt: t, updatedAt: t, createdBy: u.id, ...data };
 }
 function updateRecord(u, recordId, data) {
-  const clean = { ...data }; delete clean.id; delete clean.createdAt; delete clean.updatedAt;
-  db.prepare('UPDATE records SET data=?,updated_at=?,updated_by=? WHERE id=? AND tenant_id=?').run(JSON.stringify(clean), now(), u.id, recordId, u.tenant_id);
+  const r = db.prepare('SELECT type FROM records WHERE id=? AND tenant_id=?').get(recordId, u.tenant_id);
+  db.prepare('UPDATE records SET data=?,updated_at=?,updated_by=? WHERE id=? AND tenant_id=?').run(serialize(r.type, data), now(), u.id, recordId, u.tenant_id);
 }
 
 /** 删除前的关联检查；返回错误信息或 null */
 function deleteBlocker(u, type, recordId) {
-  if (type === 'accounts' && ['contacts', 'opportunities', 'tasks', 'activities', 'contracts'].some(k => all(u, k).some(x => x.accountId === recordId))) return '存在关联数据，不能删除客户';
-  if (type === 'contracts' && all(u, 'payments').some(x => x.contractId === recordId)) return '存在回款记录，不能删除合同';
-  if (type === 'contracts' && all(u, 'plans').some(x => x.contractId === recordId)) return '存在回款计划，不能删除合同';
-  if (type === 'opportunities' && all(u, 'contracts').some(x => x.opportunityId === recordId)) return '商机已关联合同，不能删除';
+  if (type === 'accounts' && ['contacts', 'opportunities', 'tasks', 'activities', 'contracts'].some(k => childrenOf(u, k, 'accountId', recordId).length)) return '存在关联数据，不能删除客户';
+  if (type === 'contracts' && childrenOf(u, 'payments', 'contractId', recordId).length) return '存在回款记录，不能删除合同';
+  if (type === 'contracts' && childrenOf(u, 'plans', 'contractId', recordId).length) return '存在回款计划，不能删除合同';
+  if (type === 'opportunities' && childrenOf(u, 'contracts', 'opportunityId', recordId).length) return '商机已关联合同，不能删除';
   return null;
 }
 function softDelete(u, type, recordId) {
@@ -361,8 +456,29 @@ function migrateLegacyValues() {
   }
   db.prepare("UPDATE records SET data=json_set(data,'$.method','银行转账') WHERE type='payments' AND json_extract(data,'$.method')='转账'").run();
 }
+/** 版本化数据迁移（PRAGMA user_version） */
+function migrate() {
+  const version = db.prepare('PRAGMA user_version').get().user_version;
+  if (version < 1) {
+    transaction(() => {
+      migrateLegacyValues();
+      // 金额改为整数分存储
+      db.prepare(`UPDATE records SET data=json_remove(json_set(data,'$.amountCents',CAST(ROUND(COALESCE(json_extract(data,'$.amount'),0)*100) AS INTEGER)),'$.amount')
+        WHERE type IN ('opportunities','contracts','payments','plans') AND json_extract(data,'$.amountCents') IS NULL`).run();
+      // 负责人姓名 → 成员 ID（仅姓名唯一时）
+      for (const t of db.prepare('SELECT id FROM tenants').all()) {
+        const users = db.prepare('SELECT id,display_name FROM users WHERE tenant_id=?').all(t.id);
+        const byName = new Map();
+        for (const x of users) byName.set(x.display_name, byName.has(x.display_name) ? null : x.id);
+        const upd = db.prepare("UPDATE records SET data=json_set(data,'$.ownerId',?) WHERE tenant_id=? AND json_extract(data,'$.owner')=? AND COALESCE(json_extract(data,'$.ownerId'),'')=''");
+        for (const [name, uid] of byName) if (uid) upd.run(uid, t.id, name);
+      }
+    });
+    db.exec('PRAGMA user_version=1');
+  }
+}
 initAdmin();
-migrateLegacyValues();
+migrate();
 purgeSessions();
 
 // ---------- 统计 ----------
@@ -403,7 +519,7 @@ function buildBuckets(range, today = new Date()) {
 
 function dashboard(u, range) {
   const data = {};
-  for (const k of Object.keys(TABLES)) data[k] = all(u, k);
+  for (const k of Object.keys(TABLES)) data[k] = scoped(u, k);
   const sum = arr => yuan(sumCents(arr));
   const today = ymd(new Date());
   const thisMonth = monthRange(0), lastMonth = monthRange(-1);
@@ -453,8 +569,8 @@ function dashboard(u, range) {
 }
 
 function finance(u) {
-  const contracts = all(u, 'contracts').filter(c => c.status !== '已作废');
-  const payments = all(u, 'payments'), plans = all(u, 'plans'), accounts = all(u, 'accounts');
+  const contracts = scoped(u, 'contracts').filter(c => c.status !== '已作废');
+  const payments = scoped(u, 'payments'), plans = scoped(u, 'plans'), accounts = all(u, 'accounts');
   const today = ymd(new Date());
   const accountName = id => accounts.find(a => a.id === id)?.name || '';
   let receivable = 0, received = 0;
@@ -492,7 +608,7 @@ function reports(u, from, to) {
   const prevFrom = ymd(new Date(new Date(from + 'T00:00:00') - spanDays * 86400000));
   const prev = [prevFrom, prevTo];
   const data = {};
-  for (const k of ['accounts', 'leads', 'opportunities', 'contracts', 'payments']) data[k] = all(u, k);
+  for (const k of ['accounts', 'leads', 'opportunities', 'contracts', 'payments']) data[k] = scoped(u, k);
   const created = x => localDay(x.createdAt);
   const contracts = data.contracts.filter(isEffectiveContract);
 
@@ -548,9 +664,9 @@ function reports(u, from, to) {
 }
 
 // ---------- 列表查询（关键字 / 字段过滤 / 排序 / 分页） ----------
-const FILTERABLE = ['status', 'stage', 'source', 'owner', 'industry', 'level', 'type', 'priority', 'accountId', 'contractId', 'opportunityId', 'result', 'method'];
+const FILTERABLE = ['status', 'stage', 'source', 'owner', 'ownerId', 'industry', 'level', 'type', 'priority', 'accountId', 'contractId', 'opportunityId', 'result', 'method'];
 function listRecords(u, type, params) {
-  let items = all(u, type);
+  let items = scoped(u, type);
   for (const f of FILTERABLE) {
     const v = params.get(f);
     if (v) items = items.filter(x => String(x[f] ?? '') === v);
@@ -597,7 +713,7 @@ function search(u, q) {
   if (!q) return { results: [] };
   const results = [];
   for (const [type, keys] of [['accounts', ['name', 'phone', 'email']], ['leads', ['name', 'company', 'phone']], ['opportunities', ['name']], ['contracts', ['name', 'number']], ['contacts', ['name', 'phone']]]) {
-    for (const x of all(u, type)) {
+    for (const x of scoped(u, type)) {
       if (keys.some(k => String(x[k] || '').toLowerCase().includes(q))) results.push({ type, id: x.id, title: x.number ? `${x.number} ${x.name}` : x.name, sub: x.company || x.phone || x.stage || x.status || '', accountId: x.accountId });
       if (results.filter(r => r.type === type).length >= 5) break;
     }
@@ -606,12 +722,12 @@ function search(u, q) {
 }
 
 function accountOverview(u, accountId) {
-  const account = row(getRecord(u, 'accounts', accountId));
+  const account = row(getVisible(u, 'accounts', accountId));
   if (!account) boom(404, '客户不存在');
-  const of = type => all(u, type).filter(x => x.accountId === accountId);
+  const of = type => scoped(u, type).filter(x => x.accountId === accountId);
   const contracts = of('contracts');
   const contractIds = new Set(contracts.map(c => c.id));
-  const payments = all(u, 'payments').filter(p => contractIds.has(p.contractId));
+  const payments = scoped(u, 'payments').filter(p => contractIds.has(p.contractId));
   const activities = of('activities').sort((a, b) => String(b.occurredAt || b.createdAt).localeCompare(String(a.occurredAt || a.createdAt)));
   return {
     account, contacts: of('contacts'), activities, opportunities: of('opportunities'), contracts, payments, tasks: of('tasks'),
@@ -627,7 +743,8 @@ function accountOverview(u, accountId) {
 
 // ---------- 用户管理 ----------
 function listUsers(u) {
-  return db.prepare('SELECT id,email,role,display_name name,department,active,created_at createdAt,last_login_at lastLoginAt FROM users WHERE tenant_id=? ORDER BY created_at').all(u.tenant_id)
+  return db.prepare('SELECT id,email,role,display_name name,department,active,created_at createdAt,last_login_at lastLoginAt,data_scope dataScope FROM users WHERE tenant_id=? ORDER BY created_at').all(u.tenant_id)
+    .map(x => ({ ...x, dataScopeSet: x.dataScope || '', dataScope: DATA_SCOPES.includes(x.dataScope) ? x.dataScope : DEFAULT_SCOPE[x.role] }))
     .map(x => (canManage(u) ? x : { id: x.id, name: x.name, role: x.role, department: x.department, active: x.active }));
 }
 async function createUser(u, req) {
@@ -637,8 +754,9 @@ async function createUser(u, req) {
   if (!ROLES.includes(role) || !/^\S+@\S+\.\S+$/.test(email) || password.length < 12) boom(400, '用户信息无效：邮箱格式、角色或密码长度不符合要求');
   const uid = newId();
   try {
-    db.prepare('INSERT INTO users(id,tenant_id,email,password_hash,role,display_name,active,created_at,department) VALUES(?,?,?,?,?,?,?,?,?)')
-      .run(uid, u.tenant_id, email, hashPwd(password), role, String(b.name || email).slice(0, 100), 1, now(), String(b.department || '').slice(0, 50));
+    const dataScope = DATA_SCOPES.includes(b.dataScope) ? b.dataScope : '';
+    db.prepare('INSERT INTO users(id,tenant_id,email,password_hash,role,display_name,active,created_at,department,data_scope) VALUES(?,?,?,?,?,?,?,?,?,?)')
+      .run(uid, u.tenant_id, email, hashPwd(password), role, String(b.name || email).slice(0, 100), 1, now(), String(b.department || '').slice(0, 50), dataScope);
   } catch { boom(409, '邮箱已存在'); }
   audit(u, 'create', 'users', uid, { email, role });
   return { id: uid };
@@ -653,6 +771,7 @@ async function updateUser(u, req, userId) {
     department: b.department !== undefined ? String(b.department).slice(0, 50) : target.department,
     role: b.role !== undefined ? String(b.role) : target.role,
     active: b.active !== undefined ? (b.active ? 1 : 0) : target.active,
+    data_scope: b.dataScope !== undefined ? (DATA_SCOPES.includes(b.dataScope) ? b.dataScope : '') : target.data_scope,
   };
   if (!ROLES.includes(next.role)) boom(400, '角色无效');
   if (target.id === u.id && (next.role !== 'admin' || !next.active)) boom(400, '不能停用或降级自己的管理员账号');
@@ -663,10 +782,12 @@ async function updateUser(u, req, userId) {
   const resetPassword = b.password !== undefined && b.password !== '';
   if (resetPassword && String(b.password).length < 12) boom(400, '新密码不少于12位');
   transaction(() => {
-    db.prepare('UPDATE users SET display_name=?,department=?,role=?,active=? WHERE id=?').run(next.display_name, next.department, next.role, next.active, target.id);
+    db.prepare('UPDATE users SET display_name=?,department=?,role=?,active=?,data_scope=? WHERE id=?').run(next.display_name, next.department, next.role, next.active, next.data_scope, target.id);
+    // 负责人姓名为冗余字段，随成员改名同步
+    if (next.display_name !== target.display_name) db.prepare("UPDATE records SET data=json_set(data,'$.owner',?) WHERE tenant_id=? AND json_extract(data,'$.ownerId')=?").run(next.display_name, u.tenant_id, target.id);
     if (resetPassword) db.prepare('UPDATE users SET password_hash=? WHERE id=?').run(hashPwd(String(b.password)), target.id);
     if (resetPassword || !next.active || next.role !== target.role) db.prepare('DELETE FROM sessions WHERE user_id=?').run(target.id);
-    audit(u, 'update', 'users', target.id, { before: { name: target.display_name, role: target.role, department: target.department, active: target.active }, resetPassword });
+    audit(u, 'update', 'users', target.id, { before: { name: target.display_name, role: target.role, department: target.department, active: target.active, dataScope: target.data_scope }, resetPassword });
   });
   return { ok: true };
 }
@@ -678,7 +799,7 @@ async function api(req, res, url) {
 
   if (p === '/api/login' && m === 'POST') {
     const b = await readBody(req), email = String(b.email || '').trim().toLowerCase();
-    const ip = req.socket.remoteAddress || '';
+    const ip = clientIp(req);
     const keys = [[`acct:${email}`, LOGIN_MAX_PER_ACCOUNT], [`ip:${ip}`, LOGIN_MAX_PER_IP]];
     if (loginBlocked(keys)) boom(429, '登录失败次数过多，请 15 分钟后再试');
     const found = db.prepare('SELECT * FROM users WHERE email=? AND active=1').all(email).find(x => verifyPwd(String(b.password || ''), x.password_hash));
@@ -746,6 +867,11 @@ async function api(req, res, url) {
       .all(...(entity ? [u.tenant_id, entity] : [u.tenant_id]));
     return send(res, 200, { items });
   }
+  if (p === '/api/backups') {
+    if (u.role !== 'admin') boom(403, '仅管理员可管理备份');
+    if (m === 'GET') return send(res, 200, { items: backups.listBackups(DATA_DIR), schedule: { intervalHours: BACKUP_INTERVAL_HOURS, keep: BACKUP_KEEP } });
+    if (m === 'POST') { const file = backups.backup(db, DATA_DIR, BACKUP_KEEP); audit(u, 'backup', 'system', path.basename(file)); return send(res, 201, { name: path.basename(file) }); }
+  }
   if (p === '/api/dashboard' && m === 'GET') return send(res, 200, dashboard(u, url.searchParams.get('range') || 'year'));
   if (p === '/api/finance' && m === 'GET') return send(res, 200, finance(u));
   if (p === '/api/search' && m === 'GET') return send(res, 200, search(u, url.searchParams.get('q')));
@@ -780,6 +906,7 @@ async function api(req, res, url) {
     const submitted = await readBody(req);
     if (type === 'leads' && Object.hasOwn(submitted, 'convertedAccountId')) boom(400, '不能自行设置转换关联');
     const data = sanitize(type, submitted);
+    resolveOwner(u, type, data, submitted);
     if (type === 'contracts') { guardContractStatus(u, { status: '草稿' }, data); if (!data.number) data.number = nextContractNumber(u); }
     validRefs(u, type, data);
     const item = transaction(() => { const it = insertRecord(u, type, data); audit(u, 'create', type, it.id); return it; });
@@ -796,7 +923,7 @@ async function api(req, res, url) {
       if (!canDelete(u)) boom(403, '仅经理或管理员可删除');
       transaction(() => {
         for (const key of ids) {
-          if (!getRecord(u, type, key)) { failed.push({ id: key, error: '记录不存在' }); continue; }
+          if (!getVisible(u, type, key)) { failed.push({ id: key, error: '记录不存在' }); continue; }
           const why = deleteBlocker(u, type, key);
           if (why) { failed.push({ id: key, error: why }); continue; }
           softDelete(u, type, key); done.push(key);
@@ -804,14 +931,16 @@ async function api(req, res, url) {
       });
     } else if (b.action === 'assign') {
       if (!canWrite(u)) boom(403, '无编辑权限');
-      if (!TABLES[type].fields.includes('owner')) boom(400, '该对象不支持分配负责人');
-      const owner = String(b.owner || '').trim().slice(0, 100);
-      if (!owner) boom(400, '请选择负责人');
+      if (!TABLES[type].fields.includes('ownerId')) boom(400, '该对象不支持分配负责人');
+      const target = b.ownerId ? findUser(u, { id: String(b.ownerId) }) : b.owner ? findUser(u, { name: String(b.owner) }) : undefined;
+      if (!target) boom(400, '请选择有效的负责人');
+      assertCanAssign(u, target);
+      const owner = target.display_name;
       transaction(() => {
         for (const key of ids) {
-          const old = getRecord(u, type, key);
+          const old = getVisible(u, type, key);
           if (!old) { failed.push({ id: key, error: '记录不存在' }); continue; }
-          const before = row(old), data = { ...before, owner };
+          const before = row(old), data = { ...before, owner, ownerId: target.id };
           if (type === 'leads' && before.status === '未联系') data.status = '已分配';
           updateRecord(u, key, data);
           audit(u, 'assign', type, key, { before: { owner: before.owner }, owner });
@@ -822,7 +951,7 @@ async function api(req, res, url) {
     return send(res, 200, { done, failed });
   }
 
-  const old = getRecord(u, type, recordId);
+  const old = getVisible(u, type, recordId);
   if (!old) boom(404, '记录不存在');
 
   if (act) {
@@ -834,7 +963,7 @@ async function api(req, res, url) {
       const lead = row(old);
       if (lead.convertedAccountId) boom(409, '该线索已转化');
       const t = now();
-      const account = sanitize('accounts', { name: lead.company || lead.name, phone: lead.phone || '', email: lead.email || '', owner: lead.owner || '', source: lead.source || '' });
+      const account = sanitize('accounts', { name: lead.company || lead.name, phone: lead.phone || '', email: lead.email || '', owner: lead.owner || u.display_name, ownerId: lead.ownerId || u.id, source: lead.source || '' });
       const result = transaction(() => {
         const acc = insertRecord(u, 'accounts', account, t);
         let contactId = null;
@@ -848,10 +977,10 @@ async function api(req, res, url) {
 
     if (type === 'opportunities' && act === 'contract') {
       const opp = row(old);
-      if (all(u, 'contracts').some(c => c.opportunityId === recordId && c.status !== '已作废')) boom(409, '该商机已生成合同');
+      if (childrenOf(u, 'contracts', 'opportunityId', recordId).some(c => c.status !== '已作废')) boom(409, '该商机已生成合同');
       if (opp.stage === '输单') boom(409, '输单商机不能转合同');
       const result = transaction(() => {
-        const data = sanitize('contracts', { name: opp.name, accountId: opp.accountId, opportunityId: recordId, amount: opp.amount || 0, owner: opp.owner || '' });
+        const data = sanitize('contracts', { name: opp.name, accountId: opp.accountId, opportunityId: recordId, amount: opp.amount || 0, owner: opp.owner || u.display_name, ownerId: opp.ownerId || u.id });
         data.number = nextContractNumber(u);
         const c = insertRecord(u, 'contracts', data);
         updateRecord(u, recordId, { ...opp, stage: '赢单', probability: 100 });
@@ -889,10 +1018,13 @@ async function api(req, res, url) {
     const submitted = await readBody(req);
     if (type === 'leads' && Object.hasOwn(submitted, 'convertedAccountId')) boom(400, '不能自行设置转换关联');
     const before = row(old);
-    const data = sanitize(type, submitted, JSON.parse(old.data));
+    const existing = { ...before }; for (const k of ['id', 'createdAt', 'updatedAt', 'createdBy']) delete existing[k];
+    const data = sanitize(type, submitted, existing);
+    resolveOwner(u, type, data, submitted, before);
     if (type === 'contracts') guardContractStatus(u, before, data);
     validRefs(u, type, data, recordId);
     transaction(() => { updateRecord(u, recordId, data); audit(u, 'update', type, recordId, { before }); });
+    resetScope(u);
     return send(res, 200, { item: row(getRecord(u, type, recordId)) });
   }
   if (m === 'DELETE') {
@@ -918,7 +1050,7 @@ function staticFile(req, res, url) {
   if (!st.isFile()) boom(404, '页面不存在');
   res.writeHead(200, {
     'Content-Type': mime[path.extname(file)] || 'application/octet-stream', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-cache',
-    'Content-Security-Policy': CSP, 'Referrer-Policy': 'same-origin', 'X-Frame-Options': 'DENY',
+    'Content-Security-Policy': CSP, 'Referrer-Policy': 'same-origin', 'X-Frame-Options': 'DENY', ...SECURITY_HEADERS,
   });
   fs.createReadStream(file).pipe(res);
 }
@@ -951,6 +1083,19 @@ const server = http.createServer(async (req, res) => {
 
 const housekeeping = setInterval(() => { purgeSessions(); pruneLoginFailures(); }, 3600 * 1000);
 housekeeping.unref();
+
+// ---------- 定时备份 ----------
+const BACKUP_INTERVAL_HOURS = Number(process.env.BACKUP_INTERVAL_HOURS ?? 24);
+const BACKUP_KEEP = Number(process.env.BACKUP_KEEP ?? 14);
+function scheduledBackup() {
+  try { console.log('[backup] 已生成', backups.backup(db, DATA_DIR, BACKUP_KEEP)); } catch (e) { console.error('[backup] 失败', e); }
+}
+if (require.main === module && BACKUP_INTERVAL_HOURS > 0) {
+  const latest = backups.listBackups(DATA_DIR)[0];
+  const due = !latest || Date.now() - new Date(latest.createdAt) > BACKUP_INTERVAL_HOURS * 3600000;
+  if (due) setTimeout(scheduledBackup, 60 * 1000).unref();
+  setInterval(scheduledBackup, BACKUP_INTERVAL_HOURS * 3600000).unref();
+}
 
 if (require.main === module) {
   server.listen(PORT, process.env.HOST || '0.0.0.0', () => console.log(`NovaCRM V${VERSION} listening on http://localhost:${PORT}`));
