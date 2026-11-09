@@ -68,7 +68,9 @@ CRM_URL=http://localhost:3100 CRM_PASSWORD=你的管理员密码 npm run seed
 
 | 路径 | 内容 |
 |---|---|
-| `server.js` | HTTP API、SQLite 模型与迁移、权限、定时任务 |
+| `server.js` | 入口：初始化数据、启动服务、定时摘要与备份 |
+| `src/` | 服务端模块：`config` 配置、`db` 表结构、`constants` 业务字典、`auth` 密码与会话、`scope` 数据权限、`settings` 系统设置、`records` 校验与审批、`query` 列表与搜索、`stats` 统计与对账、`notify` 通知、`sso` 第三方登录、`attachments` 附件、`importer` 导入、`users` 成员、`app` HTTP 服务 |
+| `src/routes/` | API 路由，按 `public`（免登录）→ `account` → `settings` → `data` → `admin` → `records`（通用实体）顺序匹配 |
 | `lib/` | SMTP、OIDC、企业微信、钉钉、TOTP、二维码、xlsx、CSV、备份 |
 | `public/` | 单页前端（`index.html`、`app.js`、`style.css`）与精简的钉钉 JSAPI |
 | `scripts/` | `backup.js`、`restore.js`、`seed.js` |
