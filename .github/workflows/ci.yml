@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Syntax check
+        run: npm run check
+      - name: API integration tests
+        run: npm test
+      - name: Install Playwright (Chromium only)
+        run: |
+          npm install --no-save --no-package-lock playwright@1.63.0
+          npx playwright install --with-deps chromium
+      - name: Browser end-to-end tests
+        run: npm run e2e
+      - name: Docker image builds
+        run: docker build -t novacrm:ci .

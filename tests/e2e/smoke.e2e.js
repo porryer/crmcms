@@ -1,0 +1,273 @@
+'use strict';
+/**
+ * 浏览器端到端冒烟测试（Playwright + Chromium）：npm run e2e
+ * 覆盖主业务闭环：登录 → 新建客户 → 联系人 → 商机（远程搜索选择客户）→ 看板拖拽 → 转合同 → 审批 → 回款 → 对账单 → 导入，
+ * 并检查所有页面无 JS 异常、无 CSP 拦截。
+ */
+const test = require('node:test'), assert = require('node:assert/strict');
+const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+const { chromium, devices } = require('playwright');
+const { startServer, mockIdp, mockOpenApi } = require('../helpers');
+/** 在 Node 侧轮询（页面启用严格 CSP，避免 waitForFunction 在部分 Playwright 版本中使用 eval） */
+async function waitFor(fn, timeout = 10000) {
+  const end = Date.now() + timeout;
+  while (Date.now() < end) { if (await fn().catch(() => false)) return; await new Promise(r => setTimeout(r, 100)); }
+  throw new Error('waitFor timeout');
+}
+
+test('end-to-end smoke', { timeout: 180000 }, async t => {
+  const s = await startServer();
+  const browser = await chromium.launch();
+  t.after(async () => { await browser.close(); await s.stop(); });
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const page = await ctx.newPage();
+  page.setDefaultTimeout(10000);
+  const problems = [];
+  page.on('pageerror', e => problems.push('pageerror: ' + e.message));
+  page.on('console', m => { if (m.type() === 'error' && !/401 \(Unauthorized\)/.test(m.text())) problems.push('console: ' + m.text()); });
+  const B = s.base;
+  const settle = () => page.waitForLoadState('networkidle');
+
+  await t.test('login', async () => {
+    await page.goto(B + '/');
+    await page.fill('[name=email]', 'admin@local.crm');
+    await page.fill('[name=password]', 'TestPassword!1234');
+    await page.click('#loginForm button[type=submit]');
+    await page.waitForSelector('.kpis');
+  });
+
+  await t.test('create customer via form', async () => {
+    await page.goto(B + '/#/accounts'); await settle();
+    await page.click('button[data-act=create]');
+    await page.fill('dialog [name=name]', '端到端科技');
+    await page.selectOption('dialog [name=industry]', '科技/IT');
+    await page.click('dialog button[type=submit]');
+    await page.waitForSelector('td a.link:has-text("端到端科技")');
+  });
+
+  await t.test('customer detail: add contact with preset customer', async () => {
+    await page.click('td a.link:has-text("端到端科技")'); await settle();
+    await page.click('[data-tab=contacts]'); await settle();
+    await page.click('button[data-act=create][data-type=contacts]');
+    await page.waitForSelector('dialog select[name=accountId] option:checked:has-text("端到端科技")', { state: 'attached' });
+    await page.fill('dialog [name=name]', '王经理');
+    await page.click('dialog button[type=submit]'); await settle();
+    await page.waitForSelector('td:has-text("王经理")');
+  });
+
+  let oppId;
+  await t.test('create opportunity with remote customer search, drag on kanban', async () => {
+    await page.goto(B + '/#/opportunities'); await settle();
+    await page.click('button[data-act=create][data-type=opportunities]');
+    await page.fill('dialog [name=name]', '端到端项目');
+    await page.fill('dialog .rselect[data-kind=account] [data-rs-q]', '端到端');
+    await page.waitForSelector('dialog select[name=accountId] option:has-text("端到端科技")', { state: 'attached' });
+    const val = await page.$eval('dialog select[name=accountId]', sel => [...sel.options].find(o => o.textContent.includes('端到端科技')).value);
+    await page.selectOption('dialog select[name=accountId]', val);
+    await page.fill('dialog [name=amount]', '88000');
+    await page.click('dialog button[type=submit]'); await settle();
+    const card = page.locator('.deal:has-text("端到端项目")');
+    await card.waitFor();
+    oppId = await card.getAttribute('data-id');
+    await card.dragTo(page.locator('.lane[data-stage="方案报价"]'));
+    await page.waitForSelector('.lane[data-stage="方案报价"] .deal:has-text("端到端项目")');
+    assert.equal((await s.req('/opportunities/' + oppId)).data.item.stage, '方案报价');
+  });
+
+  await t.test('opportunity -> contract -> approval -> payment', async () => {
+    await page.goto(B + '/#/opportunities/' + oppId); await settle();
+    await page.click('button[data-act=opp-contract]');
+    await page.click('dialog button[type=submit]');
+    await page.waitForURL(/#\/contracts/); await settle();
+    await page.click('button[data-act=submit-contract]'); await settle();
+    await page.click('button[data-act=approve-contract]');
+    await page.waitForSelector('dialog textarea[name=note]');
+    await page.fill('dialog textarea[name=note]', '同意');
+    await page.click('dialog button[type=submit]'); await settle();
+    await page.waitForSelector('td .tag:has-text("已签订")');
+    await page.click('button[data-act=pay-contract]');
+    await waitFor(async () => !!(await page.inputValue('dialog select[name=contractId]')));
+    await page.fill('dialog [name=amount]', '30000');
+    await page.click('dialog button[type=submit]'); await settle();
+    const fin = (await s.req('/finance')).data.totals;
+    assert.equal(fin.receivable, 88000); assert.equal(fin.received, 30000);
+  });
+
+  await t.test('statement shows balance', async () => {
+    await page.goto(B + '/#/finance'); await settle();
+    await page.click('[data-tab=statements]'); await settle();
+    await page.waitForSelector('.statement td:has-text("端到端科技")');
+    assert.match(await page.textContent('.statement'), /58,000/);
+  });
+
+  await t.test('CSV import', async () => {
+    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'e2e-')), 'acc.csv');
+    fs.writeFileSync(file, '客户名称,行业\n导入一号,制造业\n导入二号,金融\n');
+    await page.goto(B + '/#/accounts'); await settle();
+    await page.click('button[data-act=import]');
+    await page.setInputFiles('dialog [data-role=import-file]', file);
+    await page.waitForSelector('dialog .import-sum');
+    await page.click('dialog button[type=submit]'); await settle();
+    assert.equal((await s.req('/accounts')).data.total, 3);
+  });
+
+  await t.test('every page renders without errors', async () => {
+    for (const p of ['dashboard', 'leads', 'accounts', 'contacts', 'opportunities?view=list', 'contracts', 'finance', 'tasks', 'activities', 'reports', 'team', 'settings']) {
+      await page.goto(`${B}/#/${p}`); await settle();
+      assert.equal(await page.locator('#content .empty .ic + p').filter({ hasText: /错误|失败/ }).count(), 0, p);
+    }
+    for (const tab of ['basic', 'dicts', 'fields', 'approval', 'audits', 'about']) { await page.click(`[data-tab=${tab}]`); await settle(); }
+    await page.click('[data-act=notif]'); await page.waitForSelector('#notifPanel:not([hidden])');
+  });
+
+  await t.test('two-step verification: enrol via UI (QR), then two-step login', async () => {
+    const TOTP = require('../../lib/totp');
+    await s.req('/users', { method: 'POST', body: { email: 'mfa@x.cn', name: 'MFA', password: 'Password!12345', role: 'sales' } });
+    const ctx2 = await browser.newContext(); const p2 = await ctx2.newPage();
+    p2.on('pageerror', e => problems.push('mfa pageerror: ' + e.message));
+    const login = async otp => {
+      await p2.goto(B + '/');
+      await p2.fill('[name=email]', 'mfa@x.cn'); await p2.fill('[name=password]', 'Password!12345');
+      await p2.click('#loginForm button[type=submit]');
+      if (otp) { await p2.waitForSelector('[name=otp]'); await p2.fill('[name=otp]', otp()); await p2.click('#loginForm button[type=submit]'); }
+      await p2.waitForSelector('.kpis');
+    };
+    await login();
+    await p2.click('[data-act=user-menu]'); await p2.click('[data-act=mfa]');
+    assert.ok(!(await p2.isVisible('dialog button[type=submit]')), '开始设置前不显示提交按钮');
+    await p2.click('[data-act=mfa-start]');
+    await p2.waitForSelector('.mfa-setup .qr svg');
+    const secret = (await p2.textContent('.secret')).replace(/\s/g, '');
+    await p2.fill('dialog [name=code]', TOTP.totp(secret, Date.now() - 30000));
+    await p2.click('dialog button[type=submit]');
+    await waitFor(async () => (await s.req('/users')).data.items.find(x => x.email === 'mfa@x.cn').mfaEnabled === 1);
+    await p2.click('[data-act=user-menu]'); await p2.click('[data-act=logout]');
+    await login(() => TOTP.totp(secret));
+    await ctx2.close();
+  });
+
+  await t.test('single sign-on via OIDC in the browser', async () => {
+    const idp = await mockIdp();
+    try {
+      const s2 = await startServer({ env: { SSO_ALLOW_HTTP: '1' } });
+      try {
+        await s2.req('/settings', { method: 'PUT', body: { sso: { enabled: true, issuer: idp.base, clientId: 'crm-app', clientSecret: 'top-secret', buttonText: '企业账号登录', autoCreate: true } } });
+        idp.browserClaims = { sub: 'browser-1', email: 'browser@x.cn', name: '浏览器用户' };
+        const ctx3 = await browser.newContext(); const p3 = await ctx3.newPage();
+        p3.on('pageerror', e => problems.push('sso pageerror: ' + e.message));
+        await p3.goto(s2.base + '/');
+        await p3.click('#ssoBox a:has-text("企业账号登录")');
+        await p3.waitForSelector('.kpis');
+        assert.match(await p3.textContent('.uname'), /浏览器用户/);
+        // 失败回跳显示错误
+        idp.browserClaims = { sub: 'other', email: 'browser@x.cn' };
+        const p4 = await (await browser.newContext()).newPage();
+        await p4.goto(s2.base + '/'); await p4.click('#ssoBox a');
+        await p4.waitForSelector('.toast.error');
+        assert.match(await p4.textContent('.toast'), /已绑定其他身份/);
+        await ctx3.close();
+      } finally { await s2.stop(); }
+    } finally { idp.close(); }
+  });
+
+  await t.test('WeCom / DingTalk QR login and self-binding in the browser', async () => {
+    const api = await mockOpenApi();
+    const s3 = await startServer({ env: { WECOM_API_BASE: api.base, WECOM_LOGIN_BASE: api.base, WECOM_OAUTH_BASE: api.base, DINGTALK_API_BASE: api.base, DINGTALK_LOGIN_BASE: api.base } });
+    try {
+      await s3.req('/settings', { method: 'PUT', body: { wecom: { enabled: true, corpId: 'ww123', agentId: '1000002', secret: 'wecom-secret' }, dingtalk: { enabled: true, clientId: 'dingkey', clientSecret: 'ding-secret', corpId: 'ding-corp' } } });
+      await s3.req('/users', { method: 'POST', body: { email: 'zhao@corp.cn', name: '赵六', password: 'Password!12345', role: 'sales', mobile: '13700000006' } });
+      const ctx = await browser.newContext(); const pg = await ctx.newPage();
+      pg.on('pageerror', e => problems.push('im pageerror: ' + e.message));
+      // 钉钉：按手机号匹配直接登录
+      api.nextDing = { corpId: 'ding-corp', user: { unionId: 'union-zhao', nick: '赵六', mobile: '13700000006' } };
+      await pg.goto(s3.base + '/');
+      await pg.click('#ssoBox a:has-text("钉钉登录")');
+      await pg.waitForSelector('.kpis');
+      // 企业微信：拿不到邮箱/手机 → 提示先绑定
+      api.nextWecom = { userid: 'ZhaoLiu' };
+      const p2 = await (await browser.newContext()).newPage();
+      await p2.goto(s3.base + '/'); await p2.click('#ssoBox a:has-text("企业微信登录")');
+      await p2.waitForSelector('.toast.error');
+      assert.match(await p2.textContent('.toast'), /绑定企业微信/);
+      // 已登录用户在个人菜单绑定企业微信
+      await pg.click('[data-act=user-menu]');
+      await pg.click('a.dd-link:has-text("绑定企业微信")');
+      await pg.waitForSelector('.toast:has-text("已绑定企业微信")');
+      await pg.click('[data-act=user-menu]');
+      assert.ok(await pg.isVisible('[data-act=im-unbind][data-provider=wecom]'));
+      // 现在可以用企业微信扫码登录
+      await p2.goto(s3.base + '/'); await p2.click('#ssoBox a:has-text("企业微信登录")');
+      await p2.waitForSelector('.kpis');
+      assert.match(await p2.textContent('.uname'), /赵六/);
+      await ctx.close();
+    } finally { await s3.stop(); api.close(); }
+  });
+
+  await t.test('DingTalk in-app silent login (simulated client)', async () => {
+    // 真实 SDK 包可在严格 CSP 下加载
+    const pReal = await (await browser.newContext()).newPage();
+    const cspErrors = []; pReal.on('console', m => { if (m.type() === 'error') cspErrors.push(m.text()); });
+    await pReal.goto(B + '/');
+    await pReal.addScriptTag({ url: '/vendor/dingtalk-lite.js' });
+    assert.deepEqual(await pReal.evaluate(() => [typeof window.ddLite.ready, typeof window.ddLite.requestAuthCode, typeof window.ddLite.env]), ['function', 'function', 'object']);
+    assert.ok(!cspErrors.some(e => /Content Security Policy/.test(e)), cspErrors.join('\n'));
+
+    const api = await mockOpenApi();
+    const s4 = await startServer({ env: { DINGTALK_API_BASE: api.base, DINGTALK_OAPI_BASE: api.base } });
+    try {
+      await s4.req('/settings', { method: 'PUT', body: { dingtalk: { enabled: true, clientId: 'dingkey', clientSecret: 'ding-secret', corpId: 'ding-corp' } } });
+      await s4.req('/users', { method: 'POST', body: { email: 'sun@corp.cn', name: '孙八', password: 'Password!12345', role: 'sales', mobile: '13500000008' } });
+      api.ddUsers.set('sun', { name: '孙八', mobile: '13500000008' });
+      // 模拟钉钉容器：UA 含 DingTalk；SDK 换成返回授权码的桩（真实原生桥只存在于钉钉 App 内）。
+      // route 处理函数按请求执行，故每次加载都会带上当时的 nextCode
+      let nextCode = null;
+      const ctx = await browser.newContext({ userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0) AppleWebKit/605.1.15 DingTalk/7.6.0 Channel/201200' });
+      await ctx.route('**/vendor/dingtalk-lite.js', route => route.fulfill({ contentType: 'text/javascript', body:
+        `window.ddLite = { env: { platform: 'ios' }, error: function () {}, ready: function (cb) { setTimeout(cb, 10); },
+          requestAuthCode: function (o) { window.__ddArgs = o; return Promise.resolve({ code: ${JSON.stringify(nextCode)} }); } };` }));
+      const pg = await ctx.newPage();
+      pg.on('pageerror', e => problems.push('dd pageerror: ' + e.message));
+      const issue = code => { nextCode = code; api.ddInApp.set(code, { userid: 'sun', unionid: 'union-sun', name: '孙八' }); };
+      // 1. 打开即自动免登
+      issue('dd-auto-1');
+      await pg.goto(s4.base + '/');
+      await pg.waitForSelector('.kpis');
+      assert.match(await pg.textContent('.uname'), /孙八/);
+      assert.deepEqual(await pg.evaluate(() => window.__ddArgs), { corpId: 'ding-corp', clientId: 'dingkey' });
+      // 2. 主动退出后不自动登录；点“钉钉免登”重试（SDK 已加载，直接换下一次授权码）
+      await pg.click('[data-act=user-menu]'); await pg.click('[data-act=logout]');
+      await pg.waitForSelector('[data-act=dd-auto]');
+      await pg.waitForTimeout(300);
+      assert.ok(await pg.isVisible('#loginForm'), '退出后停留在登录页');
+      issue('dd-auto-2');
+      await pg.evaluate(() => { window.ddLite.requestAuthCode = () => Promise.resolve({ code: 'dd-auto-2' }); });
+      await pg.click('[data-act=dd-auto]');
+      await pg.waitForSelector('.kpis');
+      // 3. 授权失败：提示错误，仍可使用账号密码登录
+      const pg2 = await (await browser.newContext({ userAgent: 'Mozilla/5.0 DingTalk/7.6.0' })).newPage();
+      await pg2.route('**/vendor/dingtalk-lite.js', route => route.fulfill({ contentType: 'text/javascript', body: `window.ddLite={env:{},error:function(){},ready:function(cb){cb()},requestAuthCode:function(){return Promise.reject({errorMessage:'用户未授权'})}};` }));
+      await pg2.goto(s4.base + '/');
+      await pg2.waitForSelector('#ddStatus:not([hidden])');
+      assert.match(await pg2.textContent('#ddStatus'), /用户未授权/);
+      assert.ok(await pg2.isVisible('#loginForm [name=password]'));
+      await ctx.close();
+    } finally { await s4.stop(); api.close(); }
+  });
+
+  await t.test('mobile layout', async () => {
+    const m = await browser.newContext({ ...devices['iPhone 13'] });
+    const mp = await m.newPage();
+    mp.on('pageerror', e => problems.push('mobile pageerror: ' + e.message));
+    await mp.goto(B + '/');
+    await mp.fill('[name=email]', 'admin@local.crm'); await mp.fill('[name=password]', 'TestPassword!1234');
+    await mp.click('#loginForm button[type=submit]'); await mp.waitForSelector('.kpis');
+    assert.ok(await mp.isVisible('.tabbar'));
+    const box = await mp.locator('.aside').boundingBox();
+    assert.ok(box.x + box.width <= 1, '侧栏默认收起在屏幕外');
+    await mp.click('.tabbar [data-act=toggle-nav]');
+    await waitFor(async () => (await mp.locator('.aside').boundingBox()).x >= 0);
+    await m.close();
+  });
+
+  assert.deepEqual(problems, [], '浏览器中出现错误');
+});
