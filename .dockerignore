@@ -1,0 +1,13 @@
+# 镜像只需要运行时文件（Dockerfile 中逐目录 COPY），此处排除其余内容以缩小构建上下文
+.git
+.github
+.env
+.env.*
+node_modules
+data
+docs
+tests
+*.log
+*.md
+compose*.yaml
+deploy

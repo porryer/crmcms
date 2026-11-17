@@ -1,6 +1,6 @@
 # NovaCRM · 可离线运行的 Web CRM
 
-零依赖（Node.js 22 内置 `node:sqlite`）、严格 CSP、可内网离线部署的客户关系管理系统。当前版本 **1.7.x**。
+零依赖（Node.js 22 内置 `node:sqlite`）、严格 CSP、可内网离线部署的客户关系管理系统。当前版本 **1.7.x**，版本与下载见 [GitHub Releases](https://github.com/porryer/crmcms/releases)。
 
 ![工作台](docs/screenshots/01-dashboard.png)
 
@@ -8,6 +8,7 @@
 
 | 版本 | 内容 | 详细说明 |
 |---|---|---|
+| V1.7.1 | 发布流程：打标签自动推送 GHCR 镜像（amd64 / arm64）并创建 Release（源码包、离线镜像包）；基础镜像固定版本 | [CHANGELOG](CHANGELOG.md)、[docs/RELEASE.md](docs/RELEASE.md) |
 | V1.7 | 会话有效期可配置（`SESSION_HOURS`）、CI 增加 ESLint、前端拆分为 ES 模块 | REVIEW 第十一节 |
 | V1.6 | 企业微信 / 钉钉个人工作通知、通知链接登录后直达原页面、安全自查修复；SMTP 加密通道测试 | REVIEW 第八、九节 |
 | V1.5 | 钉钉客户端内免登 | REVIEW 第七节 |
@@ -32,8 +33,8 @@ node server.js
 ## Docker
 
 ```bash
-cp .env.example .env    # 修改为你自己的强密码
-docker compose up -d --build
+cp .env.example .env    # 修改为你自己的强密码；生产环境设置 CRM_IMAGE 使用已发布镜像
+docker compose up -d --build   # 已设置 CRM_IMAGE 时改用：docker compose pull crm && docker compose up -d
 docker compose logs crm # 查看首次启动信息
 ```
 
@@ -64,7 +65,7 @@ ESLint 不作为项目依赖，运行前临时安装（不写入 package.json）
 npm install --no-save --no-package-lock eslint@9.39.4 @eslint/js@9.39.4 globals@16.5.0
 ```
 
-GitHub Actions（`.github/workflows/ci.yml`）在每次推送时运行以上各项并构建 Docker 镜像。
+GitHub Actions（`.github/workflows/ci.yml`）在每次推送时运行以上各项并构建 Docker 镜像；推送 `v*` 标签时由 `release.yml` 发布版本，见 [docs/RELEASE.md](docs/RELEASE.md)。
 
 演示数据（仅演示环境，服务启动后执行）：
 

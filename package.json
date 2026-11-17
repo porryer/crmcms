@@ -1,6 +1,6 @@
 {
   "name": "novacrm",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "private": true,
   "type": "commonjs",
   "description": "Offline-ready multi-tenant CRM with built-in Node SQLite",
@@ -14,6 +14,7 @@
     "lint": "eslint .",
     "check": "node --check server.js && for f in src/*.js src/routes/*.js lib/*.js scripts/*.js; do node --check $f || exit 1; done && for f in public/js/*.js public/js/pages/*.js; do node --input-type=module --check < $f || exit 1; done",
     "backup": "node scripts/backup.js",
+    "release:check": "node scripts/release-check.js",
     "seed": "node scripts/seed.js",
     "e2e": "node --test --test-concurrency=1 tests/e2e/*.e2e.js"
   }

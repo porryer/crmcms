@@ -59,7 +59,18 @@ docker compose start crm
 
 ## 5. 升级
 
-1. 先手动备份并记录当前镜像版本（`docker image ls`）。
-2. `git pull && docker compose ... up -d --build`。
+推荐使用已发布的镜像（版本列表见 GitHub Releases，更新内容见 `CHANGELOG.md`），不在服务器上构建：
+
+1. 先手动备份（第 3 节），并记下当前 `.env` 中的 `CRM_IMAGE`。
+2. 把 `.env` 中的 `CRM_IMAGE` 改为新版本，例如 `ghcr.io/porryer/crmcms:1.7.1`，然后：
+
+   ```bash
+   docker compose -f compose.yaml -f compose.https.yaml pull crm
+   docker compose -f compose.yaml -f compose.https.yaml up -d
+   ```
+
+   内网离线环境：从 Release 下载对应架构的 `novacrm-<版本>-image-<架构>.tar.gz`，核对 `SHA256SUMS.txt` 后执行 `docker load -i <文件>`，再执行上面的 `up -d`。
 3. 数据结构迁移在启动时按 `PRAGMA user_version` 自动、幂等执行（V1.0 → V1.1：枚举值、金额转整数分、负责人姓名转成员 ID）。
-4. 回滚：恢复第 1 步的快照并使用旧镜像启动。
+4. 回滚：把 `CRM_IMAGE` 改回第 1 步记下的版本，并恢复第 1 步的快照（第 4 节）。新版本已执行的数据迁移旧版本不认识，因此回滚必须同时恢复快照。
+
+从源码构建（未设置 `CRM_IMAGE`）时，用 `git checkout vX.Y.Z && docker compose ... up -d --build`，回滚时检出旧标签重新构建。

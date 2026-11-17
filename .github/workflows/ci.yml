@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
+    branches: ['**']   # 标签推送由 release.yml 处理（其中会调用本工作流）
   pull_request:
+  workflow_call:
 
 jobs:
   test:
