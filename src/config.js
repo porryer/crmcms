@@ -2,7 +2,7 @@
 /** 运行配置（环境变量） */
 const path = require('node:path');
 
-const VERSION = '1.7.0';
+const VERSION = '1.7.1';
 const PORT = Number(process.env.PORT || 3100);
 const ROOT = path.join(__dirname, '..');
 const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, 'data');

@@ -1,5 +1,8 @@
 services:
   crm:
+    # 生产环境在 .env 设置 CRM_IMAGE=ghcr.io/porryer/crmcms:<版本> 使用已发布镜像（docker compose pull && docker compose up -d）；
+    # 未设置时用本地源码构建（docker compose up -d --build）
+    image: ${CRM_IMAGE:-novacrm:local}
     build: .
     restart: unless-stopped
     ports:

@@ -1,0 +1,145 @@
+name: Release
+
+# 推送 vX.Y.Z（或 vX.Y.Z-rc.N 预发布）标签时：
+#   1. 校验标签与 package.json / src/config.js / CHANGELOG.md 版本一致
+#   2. 运行与 CI 相同的全部检查（语法、ESLint、API 测试、E2E、镜像构建）
+#   3. 推送 linux/amd64 + linux/arm64 镜像到 ghcr.io/<owner>/<repo>
+#   4. 创建 GitHub Release：说明取自 CHANGELOG，附源码包、离线镜像包与 SHA256 校验文件
+on:
+  push:
+    tags: ['v*.*.*']
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Version consistency
+        run: node scripts/release-check.js "$GITHUB_REF_NAME"
+
+  ci:
+    needs: verify
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write   # 创建 Release
+      packages: write   # 推送 GHCR 镜像
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Prepare
+        id: prep
+        run: |
+          mkdir -p dist
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          if [[ "$VERSION" == *-* ]]; then echo "prerelease=true" >> "$GITHUB_OUTPUT"; else echo "prerelease=false" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.prep.outputs.image }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          flavor: |
+            latest=auto
+
+      - name: Build and push (amd64 + arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: VERSION=${{ steps.prep.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 离线 / 内网部署用：docker load -i novacrm-<版本>-image-<架构>.tar.gz
+      - name: Offline image (amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          build-args: VERSION=${{ steps.prep.outputs.version }}
+          tags: ${{ steps.prep.outputs.image }}:${{ steps.prep.outputs.version }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          outputs: type=docker,dest=dist/image-amd64.tar
+
+      - name: Offline image (arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          build-args: VERSION=${{ steps.prep.outputs.version }}
+          tags: ${{ steps.prep.outputs.image }}:${{ steps.prep.outputs.version }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          outputs: type=docker,dest=dist/image-arm64.tar
+
+      - name: Package assets
+        run: |
+          V="${{ steps.prep.outputs.version }}"
+          cd dist
+          gzip -9 -c image-amd64.tar > "novacrm-$V-image-amd64.tar.gz"
+          gzip -9 -c image-arm64.tar > "novacrm-$V-image-arm64.tar.gz"
+          rm image-*.tar
+          git -C .. archive --format=tar.gz --prefix="novacrm-$V/" -o "dist/novacrm-$V.tar.gz" "$GITHUB_REF_NAME"
+          sha256sum novacrm-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          node ../scripts/release-check.js "$GITHUB_REF_NAME" --notes notes.md
+          {
+            echo
+            echo '### 部署'
+            echo
+            echo '```bash'
+            echo "# 在线：.env 中设置 CRM_IMAGE=${{ steps.prep.outputs.image }}:$V"
+            echo 'docker compose pull crm && docker compose up -d'
+            echo
+            echo '# 离线：下载对应架构的镜像包后'
+            echo "docker load -i novacrm-$V-image-amd64.tar.gz"
+            echo '```'
+            echo
+            echo '升级前请先备份，步骤见 docs/DEPLOY.md 第 5 节。'
+          } >> notes.md
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          V="${{ steps.prep.outputs.version }}"
+          FLAGS=()
+          if [ "${{ steps.prep.outputs.prerelease }}" = "true" ]; then FLAGS+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" \
+            --title "NovaCRM $V" \
+            --notes-file dist/notes.md \
+            --verify-tag "${FLAGS[@]}" \
+            dist/novacrm-* dist/SHA256SUMS.txt
