@@ -5,6 +5,9 @@
 
 ## [Unreleased]
 
+### 变更
+- 发布流程中的 Docker 官方 Action 升级到基于 Node 24 的版本（setup-qemu / setup-buildx / login v4、metadata v6、build-push v7），消除 Node 20 停用警告。
+
 ## [1.7.1] - 2026-11-17
 
 ### 新增
