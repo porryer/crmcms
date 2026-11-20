@@ -5,6 +5,9 @@
 
 ## [Unreleased]
 
+### 新增
+- `LICENSE`：专有软件许可（保留所有权利）；`package.json` 标注 `UNLICENSED`；`docs/THIRD_PARTY.md` 补充 dingtalk-jsapi 的 MIT 许可全文。
+
 ### 变更
 - 发布流程中的 Docker 官方 Action 升级到基于 Node 24 的版本（setup-qemu / setup-buildx / login v4、metadata v6、build-push v7），消除 Node 20 停用警告。
 

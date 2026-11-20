@@ -3,10 +3,12 @@ FROM node:22.23.5-bookworm-slim
 ARG VERSION=dev
 LABEL org.opencontainers.image.title="NovaCRM" \
       org.opencontainers.image.source="https://github.com/porryer/crmcms" \
-      org.opencontainers.image.version="${VERSION}"
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.licenses="LicenseRef-NovaCRM-Proprietary"
 ENV NODE_ENV=production PORT=3100 DATA_DIR=/app/data TZ=Asia/Shanghai ACCESS_LOG=1
 WORKDIR /app
-COPY package.json server.js ./
+COPY package.json server.js LICENSE ./
+COPY docs/THIRD_PARTY.md ./docs/
 COPY src/ ./src/
 COPY lib/ ./lib/
 COPY public/ ./public/

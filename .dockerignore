@@ -11,3 +11,5 @@ tests
 *.md
 compose*.yaml
 deploy
+# 许可证文件随镜像分发
+!docs/THIRD_PARTY.md
