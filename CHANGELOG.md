@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [1.7.2] - 2026-11-20
+
 ### 新增
 - `LICENSE`：专有软件许可（保留所有权利）；`package.json` 标注 `UNLICENSED`；`docs/THIRD_PARTY.md` 补充 dingtalk-jsapi 的 MIT 许可全文。
 
@@ -75,6 +77,7 @@
 ### 变更
 - 对照原型完成代码审查与功能补全（详见 REVIEW 第一至四节）。
 
-[Unreleased]: https://github.com/porryer/crmcms/compare/v1.7.1...HEAD
-[1.7.1]: https://github.com/porryer/crmcms/compare/v1.7.0...v1.7.1
-[1.7.0]: https://github.com/porryer/crmcms/releases/tag/v1.7.0
+[Unreleased]: https://github.com/porryer/crmcms/compare/v1.7.2...HEAD
+[1.7.2]: https://github.com/porryer/crmcms/compare/v1.7.1...v1.7.2
+[1.7.1]: https://github.com/porryer/crmcms/compare/2ecdb8d...v1.7.1
+[1.7.0]: https://github.com/porryer/crmcms/tree/2ecdb8d
