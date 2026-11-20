@@ -8,6 +8,7 @@
 
 | 版本 | 内容 | 详细说明 |
 |---|---|---|
+| V1.7.2 | 新增专有许可 LICENSE（镜像内附带）；发布流程 docker Action 升级到 Node 24 版本 | [CHANGELOG](CHANGELOG.md) |
 | V1.7.1 | 发布流程：打标签自动推送 GHCR 镜像（amd64 / arm64）并创建 Release（源码包、离线镜像包）；基础镜像固定版本 | [CHANGELOG](CHANGELOG.md)、[docs/RELEASE.md](docs/RELEASE.md) |
 | V1.7 | 会话有效期可配置（`SESSION_HOURS`）、CI 增加 ESLint、前端拆分为 ES 模块 | REVIEW 第十一节 |
 | V1.6 | 企业微信 / 钉钉个人工作通知、通知链接登录后直达原页面、安全自查修复；SMTP 加密通道测试 | REVIEW 第八、九节 |

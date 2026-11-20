@@ -62,7 +62,7 @@ docker compose start crm
 推荐使用已发布的镜像（版本列表见 GitHub Releases，更新内容见 `CHANGELOG.md`），不在服务器上构建：
 
 1. 先手动备份（第 3 节），并记下当前 `.env` 中的 `CRM_IMAGE`。
-2. 把 `.env` 中的 `CRM_IMAGE` 改为新版本，例如 `ghcr.io/porryer/crmcms:1.7.1`，然后：
+2. 把 `.env` 中的 `CRM_IMAGE` 改为新版本，例如 `ghcr.io/porryer/crmcms:1.7.2`，然后：
 
    ```bash
    docker compose -f compose.yaml -f compose.https.yaml pull crm
