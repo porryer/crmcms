@@ -1,0 +1,51 @@
+NovaCRM 专有软件许可
+
+Copyright (c) 2026 porryer。保留所有权利。
+
+本软件及其源代码、文档、镜像和其他相关文件（以下统称“本软件”）为版权人的专有财产。
+
+除非事先取得版权人的书面许可，任何人不得：
+1. 使用、复制、修改、合并、翻译本软件或基于本软件制作衍生作品；
+2. 以任何形式发布、分发、再许可、出租、出售本软件或其副本；
+3. 将本软件用于向第三方提供服务（包括以网络服务形式提供）。
+
+本软件的源代码或镜像可以公开查看或下载，并不代表授予上述任何权利。
+
+本软件按“现状”提供，不附带任何明示或默示的担保，包括但不限于适销性、特定用途适用性和不侵权的担保。在任何情况下，版权人均不对因本软件或本软件的使用而产生的任何索赔、损害或其他责任承担责任。
+
+本软件包含的第三方组件按其各自的许可证授权，不受本许可约束，详见 docs/THIRD_PARTY.md。
+
+如需取得使用许可，请通过 https://github.com/porryer 联系版权人。
+
+------------------------------------------------------------------------
+
+NovaCRM Proprietary License
+
+Copyright (c) 2026 porryer. All rights reserved.
+
+This software, including its source code, documentation, container images and
+related files (the "Software"), is the proprietary property of the copyright
+holder.
+
+Without prior written permission from the copyright holder, no one may:
+1. use, copy, modify, merge or translate the Software, or create derivative
+   works based on it;
+2. publish, distribute, sublicense, rent or sell the Software or copies of it
+   in any form;
+3. use the Software to provide services to third parties, including as a
+   network service.
+
+Public visibility or availability of the source code or images does not grant
+any of the rights above.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR ITS USE.
+
+Third-party components included in the Software are licensed under their own
+terms and are not covered by this license; see docs/THIRD_PARTY.md.
+
+In case of any discrepancy between the Chinese and English versions, the
+Chinese version prevails.

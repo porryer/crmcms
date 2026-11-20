@@ -93,3 +93,7 @@ CRM_URL=http://localhost:3100 CRM_PASSWORD=你的管理员密码 npm run seed
 - 前端为无构建的原生 JS（约 1600 行，按功能拆为 22 个 ES 模块），未迁移 React（决策说明见 REVIEW 第五节第 12 项）。
 - OIDC、企业微信、钉钉已按官方文档实现，并在模拟服务上完成测试，**尚未与真实租户联调**。
 - 未提供：短信通知、SaaS 租户自助注册与计费、字段级权限、AI 辅助功能；未进行第三方渗透测试。
+
+## 许可证
+
+专有软件，© 2026 porryer，保留所有权利。源代码与镜像公开可见不代表授予使用、复制、修改或分发的权利，详见 [LICENSE](LICENSE)。第三方组件的许可证见 [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md)。

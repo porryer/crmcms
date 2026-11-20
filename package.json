@@ -2,6 +2,7 @@
   "name": "novacrm",
   "version": "1.7.1",
   "private": true,
+  "license": "UNLICENSED",
   "type": "commonjs",
   "description": "Offline-ready multi-tenant CRM with built-in Node SQLite",
   "engines": {
